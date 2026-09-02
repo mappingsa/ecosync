@@ -1,0 +1,57 @@
+# =====================================================================
+#  MSA EcoSync - .gitignore
+#
+#  THIS FILE MUST EXIST BEFORE THE FIRST `git add`.
+#  Git history is permanent. A secret committed once and deleted later
+#  is still in the history, still clonable, and still readable by anyone
+#  you ever give access to the repository.
+# =====================================================================
+
+# ---------- CREDENTIALS - never commit ----------
+# These hold the live Starlink Wi-Fi password and the ArcGIS API token.
+config.txt
+config_new_keys_*.txt
+*config*secret*
+ca.pem
+
+# ---------- Arduino / arduino-cli build output ----------
+# Hundreds of files, rewritten on every compile. Nothing here is source.
+build/
+build_out/
+*.elf
+*.bin
+*.map
+*.hex
+*.partitions.bin
+*.bootloader.bin
+
+# ---------- The sketch subfolders are COPIES, not source ----------
+# flash.bat copies the .ino into a folder of the same name so arduino-cli
+# will accept it. Committing both means two copies that silently drift -
+# which has already cost this project an evening once.
+MSA_Weed_Tracker_prod_*/
+MSA_Weed_Tracker_syncfix_*/
+
+# ---------- Logs ----------
+build_log.txt
+flash_log.txt
+repair_log.txt
+*.log
+
+# ---------- Field data ----------
+# Records pulled off the SD card. Keep them, but not in the code repo -
+# they are operational data, they contain positions, and they grow.
+pending.csv
+pending_poly.csv
+quarantine*.csv
+*.gdb/
+*.zip
+
+# ---------- OS / editor noise ----------
+Thumbs.db
+desktop.ini
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/

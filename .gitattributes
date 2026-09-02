@@ -1,0 +1,26 @@
+# =====================================================================
+#  Line endings
+#
+#  Without this, line endings depend on each person's local git settings,
+#  which is how a script that works on one machine breaks on another.
+# =====================================================================
+
+# Store text as LF in the repository, check out native to each platform.
+* text=auto
+
+# Windows batch files MUST be CRLF. cmd.exe can misparse labels and
+# multi-line blocks in an LF-only file, and the errors it produces do not
+# point anywhere near the real cause.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Never touch these.
+*.bin  binary
+*.elf  binary
+*.hex  binary
+*.stl  binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.pdf  binary
+*.zip  binary

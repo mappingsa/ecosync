@@ -1,0 +1,47 @@
+# MSA EcoSync Field configuration
+# One key=value per line. Lines starting with # are ignored.
+
+target1=Boxthorn
+target2=Target B
+target3=Target C
+job=MSA_Job_001
+
+# Control method written to the control_type field in ArcGIS,
+# one per target. If control_type uses a coded-value domain, put
+# the CODE here, not the description.
+control1=Foliar Spray
+control2=Spot Spray
+control3=Spot Spray
+
+# Wi-Fi. Leave wifi_ssid blank to force setup access-point mode.
+wifi_ssid=
+wifi_pass=
+
+# Fallback access point, used when the Wi-Fi above cannot be joined.
+# ap_pass must be at least 8 characters or the AP will be left open.
+ap_ssid=MSA-EcoSync-Setup
+ap_pass=
+
+# ArcGIS API key / token. Blank = anonymous (layer must be public).
+esri_token=
+
+# Config-page login. Blank admin_pass disables the prompt.
+admin_user=
+admin_pass=
+
+# Reject logging above this horizontal accuracy, in metres.
+gps_max_acc=2.0
+# Minimum movement between polygon vertices, in metres.
+poly_min_dist=5.0
+# Douglas-Peucker tolerance applied before upload, in metres. 0 disables.
+poly_simplify=2.0
+# Seconds of trigger silence that closes an open polygon.
+poly_timeout=15.0
+
+# Point de-duplication. A press is logged when EITHER point_cooldown
+# seconds have passed OR the operator has moved point_min_dist metres
+# from the last point. Stops one large weed becoming twenty records,
+# without losing the next weed if you move straight to it.
+# Set point_min_dist=0 for a plain timer.
+point_cooldown=10.0
+point_min_dist=5.0
