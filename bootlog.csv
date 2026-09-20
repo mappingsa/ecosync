@@ -1,0 +1,358 @@
+1,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+2,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+3,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+4,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+5,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+6,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+7,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+8,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+9,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+10,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+11,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+12,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+13,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+14,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+15,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+16,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+17,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+18,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+19,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+20,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+21,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+22,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+23,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+24,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+25,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+26,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+27,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+28,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+29,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+30,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+31,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+32,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+33,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+34,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+35,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+36,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+37,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+38,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+39,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+40,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+41,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+42,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+43,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+44,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+45,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+46,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+47,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+48,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+49,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+50,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+51,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+52,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+53,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+54,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+55,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+56,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+57,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+58,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+59,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+60,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+61,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+62,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+63,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+64,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+65,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+66,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+67,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+68,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+69,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+70,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+71,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+72,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+73,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+74,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+75,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+76,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+77,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+78,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+79,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+80,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+81,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+82,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+83,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+84,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+85,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+86,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+87,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+88,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+89,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+90,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+91,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+92,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+93,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+94,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+95,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+96,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+97,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+98,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+99,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+100,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+101,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+102,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+103,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+104,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+105,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+106,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+107,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+108,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+109,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+110,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+111,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+112,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+113,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+114,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+115,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+116,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+117,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+118,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+119,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+120,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+121,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+122,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+123,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+124,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+125,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+126,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+127,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+128,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+129,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+130,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+131,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+132,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+133,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+134,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+135,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+136,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+137,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+138,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+139,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+140,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+141,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+142,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+143,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+144,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+145,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+146,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+147,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+148,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+149,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+150,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+151,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+152,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+153,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+154,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+155,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+156,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+157,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+158,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+159,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+160,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+161,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+162,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+163,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+164,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+165,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+166,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+184,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+185,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+186,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+187,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+188,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+189,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+190,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+191,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+192,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+193,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+194,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+202,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+203,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+204,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+205,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+206,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+207,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+208,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+209,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+210,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+211,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+218,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+219,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+220,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+221,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+222,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+223,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+224,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+231,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+232,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+233,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+234,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+235,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+236,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+237,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+244,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+245,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+246,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+247,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+248,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+249,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+250,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+254,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+255,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+256,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+257,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+258,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+259,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+265,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+266,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+267,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+268,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+269,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+270,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+275,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+276,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+277,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+278,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+279,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+280,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+286,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+287,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+288,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+289,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+290,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+291,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+296,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+297,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+298,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+299,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+300,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+301,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+305,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+306,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+307,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+308,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+309,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+310,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+315,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+316,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+317,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+318,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+319,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+320,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+324,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+325,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+326,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+327,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+328,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+329,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+333,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+334,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+335,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+336,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+337,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+338,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+343,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+344,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+345,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+346,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+347,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+348,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+353,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+354,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+355,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+356,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+357,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+358,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+363,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+364,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+365,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+366,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+367,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+368,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+373,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+374,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+375,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+376,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+377,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+378,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+383,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+384,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+385,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+386,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+387,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+388,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+394,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+395,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+396,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+397,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+398,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+399,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+400,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+405,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+406,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+407,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+408,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+409,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+410,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+411,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+417,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+418,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+419,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+420,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+421,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+422,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+423,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+424,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+429,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+430,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+431,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+432,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+433,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+434,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+435,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+436,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+437,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+438,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+444,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+445,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+446,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+447,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+448,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+449,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+450,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+451,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+452,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+453,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+454,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+460,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+461,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+462,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+463,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+464,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+465,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+466,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+467,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+468,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+469,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+475,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+476,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+477,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+478,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+479,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+480,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+481,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+482,9,BROWNOUT - supply voltage dipped,20260918-b reset diagnostics
+489,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+491,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+492,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+507,1,power-on (battery connected or power restored),20260918-b reset diagnostics
+510,1,power-on (battery connected or power restored),20260918-b reset diagnostics

@@ -35,6 +35,8 @@
 #include <SparkFun_MAX1704x_Fuel_Gauge_Arduino_Library.h>
 #include <math.h>
 #include <sys/select.h>   // select() - used to test socket writability without blocking
+#include <esp_system.h>   // esp_reset_reason() - why the last restart happened
+#include <Preferences.h>  // boot counter, survives both reset and power cycle
 
 // ==========================================
 // 1. CONSTANTS
@@ -43,15 +45,55 @@ const char* CONFIG_PATH   = "/config.txt";
 const char* CA_CERT_PATH  = "/ca.pem";
 const char* PENDING_PTS   = "/pending.csv";
 const char* PENDING_POLY  = "/pending_poly.csv";
+const char* POLY_JOURNAL  = "/poly_journal.txt";
 const char* TMP_PTS       = "/pending.tmp";
 const char* TMP_POLY      = "/pending_poly.tmp";
 
 const int   SD_CS_PIN     = 5;
 // Bump this on every build that leaves this machine. It prints at boot and
 // shows on the dashboard, so the version actually running is never in doubt.
-const char* FIRMWARE_BUILD = "20260827-h edge-latched trigger";
+const char* FIRMWARE_BUILD = "20260920-a polygon journal";
 
 const int   TRIGGER_PIN   = 14;
+
+// GNSS over UART, for the DAN-F10N. The SparkFun breakout has no I2C at all -
+// u-blox's own product summary lists "1 UART" and nothing else - so this is a
+// required change, not a preference. Both boards are 3.3 V logic, no shifting.
+//   breakout TXD -> GNSS_RX_PIN   (module talks, ESP32 listens)
+//   breakout RXD -> GNSS_TX_PIN
+//   breakout 3V3 -> Thing Plus 3V3, GND -> GND
+// NOT the breakout's 5V pin: that feeds its own regulator, which wants 3.5 V
+// minimum, and a LiPo spends the back half of its life below that.
+const int   GNSS_RX_PIN   = 16;
+const int   GNSS_TX_PIN   = 17;
+const long  GNSS_BAUD     = 38400;   // DAN-F10N default, 8N1
+
+// Which transport actually answered. The old M9 is I2C, the new F10N is UART,
+// and while both boards exist on the bench one binary that copes with either
+// is worth more than a tidier one that does not.
+String      gnssTransport = "none";
+
+// Are SBAS corrections actually being APPLIED right now? The DAN-F10N is quoted
+// at 1.0 m CEP *with* SBAS and 1.5 m without, so the difference between those
+// two figures is entirely this flag. An accuracy number alone cannot tell you
+// which regime you are in - and "we use SouthPAN" is not a claim to make to DEW
+// on the strength of a datasheet.
+//
+// diffSolnEverSeen is kept separately because SBAS comes and goes with sky view.
+// "Never once since boot" and "had it, lost it under canopy" are different
+// faults and want different responses.
+// --- Power ---
+// All three are config-backed so they can be tuned from the Advanced page
+// without a reflash. Measured draw: 100 mA on the original code, 145 mA once
+// the always-on AP and NMEA feed arrived, 243 mA with the F10N fitted - which
+// is 8 hours on a 2000 mAh cell, and 7 hours is not a working day.
+int         cpuMhz      = 80;    // 80/160/240. Wi-Fi needs 80 minimum.
+int         uiRefreshS  = 10;    // dashboard auto-refresh; 2 s was costing real power
+bool        wifiSleep   = true;  // Wi-Fi modem sleep between beacons when STA-only
+
+bool        live_diff_soln    = false;
+bool        diffSolnEverSeen  = false;
+unsigned long diffSolnFirstMs = 0;   // how long after boot corrections first applied
 
 // Service endpoints. These are not secrets, so they stay in the sketch.
 const char* esriPointServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Points/FeatureServer/0/addFeatures";
@@ -143,6 +185,24 @@ bool   systemArmed      = false;
 bool   triggerSync      = false;
 bool   sdReady          = false;
 
+// --- Boot and reset diagnostics -------------------------------------------
+// systemArmed starts false, so EVERY restart looks exactly like "the safety
+// came on by itself". With no uptime, no boot count and no reset reason on the
+// dashboard, a reboot was invisible and the symptom got blamed on the safety
+// logic instead. esp_reset_reason() tells us precisely which it was - and in
+// particular distinguishes ESP_RST_EXT (something pulled the EN line low, e.g.
+// the Fenix wire) from a brownout or a firmware crash.
+String        bootResetReason   = "unknown";
+int           bootResetCode     = 0;
+bool          bootWasUnexpected = false;   // anything other than a clean power-on
+unsigned long bootCount         = 0;
+Preferences   bootPrefs;
+
+// Counts browser prefetch / prerender requests that were refused. If this
+// climbs while the dashboard is open, a speculative browser fetch was the
+// cause rather than a reset, and the two are then trivially told apart.
+unsigned long speculativeBlocked = 0;
+
 String currentWeed        = "";
 String currentControlType = "";   // follows the selected target
 String loggingMode        = "POINT";
@@ -210,6 +270,11 @@ String     nmeaTypesSeen = "";
 // Did the module ACCEPT the request to turn GST on? The return value used to be
 // discarded, so a rejected request looked identical to a module that simply
 // never sends GST. Now we record it and show it on the diagnostics page.
+// Did the module accept the SouthPAN configuration? Recorded so a partial
+// failure is visible rather than silently halving the accuracy.
+bool       sbasConfigOk       = false;
+String     sbasConfigDetail   = "not attempted";
+
 bool       gstEnableOk        = false;
 bool       gstEnableAttempted = false;
 String     gnssProtVer        = "";   // PROTVER identifies the module generation
@@ -445,6 +510,9 @@ static void applyConfigLine(const String &line) {
   else if (k == "point_cooldown") pointCooldownS = v.toFloat();
   else if (k == "point_min_dist") pointMinDistM  = v.toFloat();
   else if (k == "wifi_tx_dbm")   wifiTxDbm       = v.toFloat();
+  else if (k == "cpu_mhz")       cpuMhz           = v.toInt();
+  else if (k == "ui_refresh")    uiRefreshS       = v.toInt();
+  else if (k == "wifi_sleep")    wifiSleep        = (v == "1" || v == "true" || v == "yes");
   else if (k == "nmea_out")      nmeaOut          = (v == "1" || v == "true" || v == "yes");
   else if (k == "nmea_port")     nmeaPort         = v.toInt();
   else if (k == "control1")     control1         = v;
@@ -477,6 +545,11 @@ static void sanitiseConfig() {
   if (pointMinDistM < 0.0 || pointMinDistM > 1000.0)  pointMinDistM = 5.0;
   if (wifiTxDbm < 2.0 || wifiTxDbm > 19.5)            wifiTxDbm = 8.5;
   if (nmeaPort < 1024 || nmeaPort > 65535)            nmeaPort = 10110;
+  // Only these three are valid ESP32 crystal-derived speeds, and Wi-Fi will not
+  // run below 80 MHz at all - a lower value would silently kill networking.
+  if (cpuMhz != 80 && cpuMhz != 160 && cpuMhz != 240)  cpuMhz = 80;
+  // Below 2 s the page reloads faster than it renders; above 60 s it feels dead.
+  if (uiRefreshS < 2 || uiRefreshS > 60)               uiRefreshS = 10;
 }
 
 bool saveConfigToSD() {
@@ -510,6 +583,9 @@ bool saveConfigToSD() {
   f.println("# Survey123) over TCP, so they log at the unit's accuracy rather than");
   f.println("# the handset's. In the app choose a Network connection receiver and");
   f.println("# enter this unit's address and port.");
+  f.println("cpu_mhz=" + String(cpuMhz));
+  f.println("ui_refresh=" + String(uiRefreshS));
+  f.println("wifi_sleep=" + String(wifiSleep ? "1" : "0"));
   f.println("nmea_out=" + String(nmeaOut ? "1" : "0"));
   f.println("nmea_port=" + String(nmeaPort));
   f.println("");
@@ -715,6 +791,16 @@ void pollGPS() {
   live_siv        = myGNSS.getSIV();
   live_fix_type   = myGNSS.getFixType();
 
+  // Read from the same cached PVT solution as everything above, so this costs
+  // no extra bus traffic and cannot block the loop.
+  live_diff_soln  = myGNSS.getDiffSoln();
+  if (live_diff_soln && !diffSolnEverSeen) {
+    diffSolnEverSeen = true;
+    diffSolnFirstMs  = now;
+    Serial.println("SBAS corrections now being applied (" +
+                   String(now / 1000) + "s after boot).");
+  }
+
   unsigned long epoch = myGNSS.getUnixEpoch();
   // Anything before 2020 means the module has not solved time yet.
   live_time_valid = (epoch > 1577836800UL);
@@ -740,6 +826,120 @@ void pollBattery() {
 // ==========================================
 // 8. POLYGON LIFECYCLE
 // ==========================================
+// ==========================================
+// POLYGON CRASH JOURNAL
+// ==========================================
+// Vertices lived in RAM until the polygon closed, so a reset part-way through a
+// treatment lost the ENTIRE ring - not one point, everything since the trigger
+// was first pulled. That was the last unprotected data-loss path in the unit.
+//
+// Every vertex is now appended to the card as it is captured, and an unfinished
+// ring is recovered on the next boot.
+//
+// One open/append/close per vertex is deliberate. Holding the file open would be
+// faster, but unflushed data is exactly what a brownout throws away, which would
+// defeat the whole purpose. At a 2 m vertex spacing and walking pace that is a
+// write every couple of seconds - well within budget.
+
+String polyRecoveryNote = "";   // set at boot when an unfinished ring was found
+
+void journalStart(const String &weed, const String &control,
+                  const String &job, unsigned long epoch) {
+  if (!sdReady) return;
+  SD.remove(POLY_JOURNAL);                    // never append to a stale ring
+  File f = SD.open(POLY_JOURNAL, FILE_WRITE);
+  if (!f) return;
+  String w = weed;    w.replace("|", " ");
+  String c = control; c.replace("|", " ");
+  String j = job;     j.replace("|", " ");
+  f.println("H|" + w + "|" + c + "|" + j + "|" + String(epoch));
+  f.close();
+}
+
+void journalVertex(double lat, double lon, double accM) {
+  if (!sdReady) return;
+  File f = SD.open(POLY_JOURNAL, FILE_APPEND);
+  if (!f) return;
+  f.println("V|" + String(lon, 6) + "," + String(lat, 6) + "|" + String(accM, 2));
+  f.close();
+}
+
+void journalClear() {
+  if (!sdReady) return;
+  SD.remove(POLY_JOURNAL);
+}
+
+// Runs once at boot, after the unsynced counts have been read from the card.
+// A ring of three or more vertices goes through the normal pending-polygon path
+// so it syncs to ESRI like any other; anything shorter is reported and dropped,
+// because two points are not a polygon.
+void recoverPolygonJournal() {
+  if (!sdReady) return;
+  if (!SD.exists(POLY_JOURNAL)) return;
+
+  File f = SD.open(POLY_JOURNAL, FILE_READ);
+  if (!f) { polyRecoveryNote = "journal found but could not be opened"; return; }
+
+  String weed, control, job, coords;
+  unsigned long epoch   = 0;
+  double        worstAcc = 0.0;
+  int           verts    = 0;
+  bool          haveHeader = false;
+
+  while (f.available()) {
+    String line = f.readStringUntil('\n');
+    line.trim();
+    if (line.length() < 3) continue;
+
+    if (line.startsWith("H|")) {
+      int p1 = line.indexOf('|', 2);
+      int p2 = (p1 < 0) ? -1 : line.indexOf('|', p1 + 1);
+      int p3 = (p2 < 0) ? -1 : line.indexOf('|', p2 + 1);
+      if (p1 < 0 || p2 < 0 || p3 < 0) continue;      // malformed, ignore
+      weed       = line.substring(2, p1);
+      control    = line.substring(p1 + 1, p2);
+      job        = line.substring(p2 + 1, p3);
+      epoch      = strtoul(line.substring(p3 + 1).c_str(), NULL, 10);
+      haveHeader = true;
+    } else if (line.startsWith("V|")) {
+      // A vertex line can be truncated mid-write by the power loss that caused
+      // the recovery in the first place. Validate before trusting it.
+      int p1 = line.indexOf('|', 2);
+      if (p1 < 0) continue;
+      String pair = line.substring(2, p1);
+      if (pair.indexOf(',') < 0) continue;
+      double a = line.substring(p1 + 1).toFloat();
+      coords += pair + ";";
+      verts++;
+      if (a > worstAcc) worstAcc = a;
+    }
+  }
+  f.close();
+
+  if (haveHeader && verts >= 3) {
+    // savePolygonLocally reads the job number from the live global, so pin it to
+    // the one that was current when the ring started, then put it back.
+    String savedJob  = currentJobNumber;
+    currentJobNumber = job;
+    bool ok = savePolygonLocally(weed, coords, epoch, control, worstAcc);
+    currentJobNumber = savedJob;
+
+    polyRecoveryNote = ok
+      ? ("RECOVERED an unfinished polygon: " + String(verts) + " vertices, " +
+         weed + " (saved, will sync)")
+      : ("Found an unfinished polygon of " + String(verts) +
+         " vertices but the SAVE FAILED - check the card");
+  } else if (haveHeader) {
+    polyRecoveryNote = "Unfinished polygon had only " + String(verts) +
+                       " vertices - too few to be a polygon, discarded";
+  } else {
+    polyRecoveryNote = "Journal file was present but unreadable - discarded";
+  }
+
+  Serial.println(polyRecoveryNote);
+  SD.remove(POLY_JOURNAL);
+}
+
 void startPolygonAt(double lat, double lon, unsigned long epoch) {
   polygonActive        = true;
   currentPolygonCoords = "";
@@ -755,6 +955,10 @@ void startPolygonAt(double lat, double lon, unsigned long epoch) {
   vertexCount   = 1;
   lastVertexLat = lat;
   lastVertexLon = lon;
+
+  // The ring is now crash-safe from its very first vertex.
+  journalStart(currentPolygonWeed, currentPolygonControl, currentJobNumber, epoch);
+  journalVertex(lat, lon, polyWorstAccM);
 }
 
 // allowSave=false discards; otherwise a polygon of 3+ vertices is written to SD.
@@ -774,6 +978,11 @@ void closePolygon(const char *reason, bool allowSave) {
   }
   Serial.println("--- POLYGON CLOSED: " + String(reason) +
                  " (" + String(vertexCount) + " vertices) ---");
+
+  // The ring is either safely in pending_poly.csv or deliberately discarded.
+  // Either way the journal has done its job and must not survive to be
+  // recovered as a phantom polygon on the next boot.
+  journalClear();
 
   currentPolygonCoords = "";
   vertexCount = 0;
@@ -811,6 +1020,8 @@ void samplePolygonVertex() {
 
   // Keep the WORST figure, so the stored value is a ceiling for the whole ring.
   if (live_accuracy_m > polyWorstAccM) polyWorstAccM = live_accuracy_m;
+
+  journalVertex(lat, lon, live_accuracy_m);
 }
 
 // ==========================================
@@ -862,6 +1073,10 @@ bool connectWiFi(unsigned long timeoutMs) {
 
   // Keep the AP alive if it is already up; otherwise station-only.
   WiFi.mode(apMode ? WIFI_AP_STA : WIFI_STA);
+  // Modem sleep parks the radio between beacons. It is only available when NOT
+  // running an access point - an AP must stay awake to beacon, which is most of
+  // why ap_always costs ~45 mA.
+  WiFi.setSleep(wifiSleep && !apMode);
   WiFi.setTxPower(txPowerSetting());
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 
@@ -909,6 +1124,38 @@ void maintainWiFi() {
 
 // Accept one phone at a time. A newer connection replaces an older one, so a
 // dropped app can simply reconnect without the unit needing a restart.
+// Configure the receiver for SouthPAN, per Geoscience Australia's published
+// u-blox settings. Returns true only if every key was accepted.
+bool configureSouthPAN() {
+  bool ok = true;
+  int failed = 0;
+
+  // SBAS on, L1C/A on - SouthPAN's open service rides the legacy L1 signal.
+  if (!myGNSS.setVal8(UBLOX_CFG_SIGNAL_SBAS_ENA, 1))      { ok = false; failed++; }
+  if (!myGNSS.setVal8(UBLOX_CFG_SIGNAL_SBAS_L1CA_ENA, 1)) { ok = false; failed++; }
+
+  // THE ONE THAT MATTERS. Without it the corrections arrive and are discarded.
+  if (!myGNSS.setVal8(UBLOX_CFG_SBAS_USE_TESTMODE, 1))    { ok = false; failed++; }
+
+  // Actually apply the differential corrections - the point of the exercise.
+  if (!myGNSS.setVal8(UBLOX_CFG_SBAS_USE_DIFFCORR, 1))    { ok = false; failed++; }
+
+  // GA specify integrity OFF and ranging OFF: SouthPAN is not certified for
+  // safety-of-life, and using a GEO as a ranging source can hurt more than help.
+  if (!myGNSS.setVal8(UBLOX_CFG_SBAS_USE_INTEGRITY, 0))   { ok = false; failed++; }
+  if (!myGNSS.setVal8(UBLOX_CFG_SBAS_USE_RANGING, 0))     { ok = false; failed++; }
+
+  // Search PRN 122 only - SouthPAN on Inmarsat-4F1 at 143.5E. The mask is a
+  // bitmask over PRN 120+n, so bit 2 = value 4.
+  if (!myGNSS.setVal64(UBLOX_CFG_SBAS_PRNSCANMASK, 4))    { ok = false; failed++; }
+
+  sbasConfigOk     = ok;
+  sbasConfigDetail = ok ? "all keys accepted"
+                        : (String(failed) + " of 7 keys REFUSED");
+  Serial.println("SouthPAN config: " + sbasConfigDetail);
+  return ok;
+}
+
 // Ask the module to emit GST, and remember whether it agreed.
 //
 // The request is a UBX-CFG-MSG that must be acknowledged. Sending it directly
@@ -918,9 +1165,10 @@ void maintainWiFi() {
 bool enableGst() {
   gstEnableAttempted = true;
   gstEnableOk = false;
+  uint8_t port = (gnssTransport == "UART1") ? COM_PORT_UART1 : COM_PORT_I2C;
   for (int attempt = 0; attempt < 3 && !gstEnableOk; attempt++) {
     delay(100);
-    gstEnableOk = myGNSS.enableNMEAMessage(UBX_NMEA_GST, COM_PORT_I2C);
+    gstEnableOk = myGNSS.enableNMEAMessage(UBX_NMEA_GST, port);
   }
   Serial.println(gstEnableOk
                  ? "GST enabled on the GNSS module."
@@ -982,6 +1230,101 @@ String networkStatusText() {
 // ==========================================
 bool wifiReconfigured = false;
 
+// ==========================================
+// BOOT / RESET DIAGNOSTICS
+// ==========================================
+
+String resetReasonText(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "power-on (battery connected or power restored)";
+    case ESP_RST_EXT:       return "EXTERNAL PIN - the EN line was pulled low";
+    case ESP_RST_SW:        return "software restart";
+    case ESP_RST_PANIC:     return "CRASH - firmware exception";
+    case ESP_RST_INT_WDT:   return "interrupt watchdog";
+    case ESP_RST_TASK_WDT:  return "task watchdog";
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "wake from deep sleep";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT - supply voltage dipped";
+    case ESP_RST_SDIO:      return "SDIO";
+    default:                return "unknown";
+  }
+}
+
+// Called first thing in setup(), before anything can reset the reason.
+void recordBoot() {
+  esp_reset_reason_t r = esp_reset_reason();
+  bootResetCode   = (int)r;
+  bootResetReason = resetReasonText(r);
+
+  // A clean power-on is expected: the operator switched it on. A software
+  // restart is ours. Everything else means something went wrong.
+  bootWasUnexpected = !(r == ESP_RST_POWERON || r == ESP_RST_SW);
+
+  // NVS, not RTC memory: RTC survives a reset but NOT a power cycle, and the
+  // whole point is to count restarts across both.
+  if (bootPrefs.begin("ecosync", false)) {
+    bootCount = bootPrefs.getULong("boots", 0) + 1;
+    bootPrefs.putULong("boots", bootCount);
+    bootPrefs.end();
+  }
+}
+
+// Appended after the SD card is up, so a fault that happens in the paddock
+// with nobody watching still leaves evidence on the card.
+void logBootToSD() {
+  if (!sdReady) return;
+  File f = SD.open("/bootlog.csv", FILE_APPEND);
+  if (!f) return;
+  f.println(String(bootCount) + "," + String(bootResetCode) + "," +
+            bootResetReason + "," + String(FIRMWARE_BUILD));
+  f.close();
+}
+
+String uptimeText() {
+  unsigned long s = millis() / 1000UL;
+  unsigned long h = s / 3600UL; s %= 3600UL;
+  unsigned long m = s / 60UL;   s %= 60UL;
+  String out = "";
+  if (h)         out += String(h) + "h ";
+  if (h || m)    out += String(m) + "m ";
+  out += String(s) + "s";
+  return out;
+}
+
+// ==========================================
+// SPECULATIVE-REQUEST GUARD
+// ==========================================
+// Browsers speculatively fetch links they think you are about to tap. Safari
+// does it, Chrome does it, and neither asks first. Any GET that changes state
+// is therefore a live grenade: a prefetch of /toggleSafety silently disarms
+// the unit with no user action at all.
+//
+// The real fix is that state changes belong on POST, and /toggleSafety has
+// been moved. This guard covers the handlers still reached by GET.
+bool isSpeculativeRequest() {
+  String purpose    = server.header("Purpose");      // Safari, older Chrome
+  String xPurpose   = server.header("X-Purpose");    // Safari
+  String xMoz       = server.header("X-Moz");        // Firefox
+  String secPurpose = server.header("Sec-Purpose");  // Chrome speculation rules
+  purpose.toLowerCase();  xPurpose.toLowerCase();
+  xMoz.toLowerCase();     secPurpose.toLowerCase();
+
+  return purpose.indexOf("prefetch")    >= 0 || purpose.indexOf("preview")   >= 0 ||
+         xPurpose.indexOf("prefetch")   >= 0 || xPurpose.indexOf("preview")  >= 0 ||
+         xMoz.indexOf("prefetch")       >= 0 ||
+         secPurpose.indexOf("prefetch") >= 0 || secPurpose.indexOf("prerender") >= 0;
+}
+
+// Returns true when the caller should do nothing further.
+bool rejectSpeculative() {
+  if (!isSpeculativeRequest()) return false;
+  speculativeBlocked++;
+  Serial.println("Refused a speculative browser fetch of " + server.uri() +
+                 " (total refused: " + String(speculativeBlocked) + ")");
+  server.send(204);          // acknowledged, nothing done
+  return true;
+}
+
 // Config pages only. Arm / target / sync stay one tap so nobody is locked out
 // of the safety control in the field.
 bool requireAuth() {
@@ -1017,11 +1360,16 @@ void handleRoot() {
   if (usable)       accColor = (accuracy_m <= 1.5) ? "#2ecc71" : "#f39c12";
   else if (gpsLock) accColor = "#f39c12";
   String accText = gpsLock ? "&plusmn; " + String(accuracy_m, 2) + " m" : "No Fix";
+  // SBAS is the difference between 1.0 m and 1.5 m CEP on this module, so it
+  // belongs next to the number it changes, not buried in diagnostics.
+  if (gpsLock && live_diff_soln) accText += " SBAS";
 
   String html = "<!DOCTYPE html><html><head>";
   html += "<meta charset='UTF-8'>";
   html += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
-  html += "<meta http-equiv='refresh' content='2'>";
+  // Every refresh is a full page rebuild plus a Wi-Fi transmit. At 2 s, a phone
+  // left open on this page all day was a continuous load for no benefit.
+  html += "<meta http-equiv='refresh' content='" + String(uiRefreshS) + "'>";
   html += "<style>body { background-color: " + bgColor + "; color: white; text-align: center; font-family: sans-serif; padding-top: 3vh; font-size: 1.1em; font-weight: bold; }</style>";
   html += "</head><body>";
 
@@ -1033,7 +1381,21 @@ void handleRoot() {
   html += "<p style='margin: 0 0 4px 0; font-size: 0.85em; color: white;'>Accuracy: <span style='background-color: " + accColor + "; color: white; padding: 4px 8px; border-radius: 6px; border: 1px solid white;'>" + accText + "</span></p>";
   html += "<p style='margin: 0 0 12px 0; font-size: 0.7em; color: black; font-weight: normal;'>Sats: " + String(live_siv) + " &nbsp; Fix type: " + String(live_fix_type) + " &nbsp; " + (usable ? "LOGGING ENABLED" : "LOGGING BLOCKED") + "</p>";
 
-  html += "<a href='/toggleSafety' style='background-color:" + lockBtnColor + "; color:white; padding:10px 20px; text-decoration:none; border-radius:8px; display:inline-block; font-size: 0.9em; border:2px solid white; margin-bottom: 10px;'>" + lockBtnText + "</a><br>";
+  // A restart always lands here with the safety ON, because systemArmed starts
+  // false. Say so loudly - otherwise it reads as the safety engaging by itself,
+  // which is what sent us looking in the wrong place the first time.
+  if (bootWasUnexpected) {
+    html += "<div style='background:#c0392b; color:white; padding:8px 10px; margin:0 12px 10px 12px; border-radius:8px; font-size:0.7em; font-weight:normal; border:1px solid white;'>";
+    html += "<b>UNEXPECTED RESTART</b><br>" + htmlEscape(bootResetReason);
+    html += "<br>The safety is always ON after a restart. Tap ARM before spraying.";
+    html += "</div>";
+  }
+
+  // POST, not a link. A GET that changes state can be fired by a browser
+  // prefetch with no user action - see isSpeculativeRequest().
+  html += "<form method='POST' action='/toggleSafety' style='margin:0 0 10px 0;'>";
+  html += "<button type='submit' style='background-color:" + lockBtnColor + "; color:white; padding:10px 20px; border-radius:8px; font-size:0.9em; border:2px solid white; font-weight:bold; font-family:inherit; cursor:pointer;'>" + lockBtnText + "</button>";
+  html += "</form>";
   html += "<hr style='width:80%; border-color:white; margin: 10px auto;'>";
 
   html += "<h3 style='color:black; margin-bottom: 2px;'>Active Target: " + htmlEscape(currentWeed) + "</h3>";
@@ -1117,6 +1479,8 @@ void handleToggleSafety() {
 }
 
 void handleSetMode() {
+  // A browser prefetch must never change what the operator is logging.
+  if (rejectSpeculative()) return;
   if (server.hasArg("m")) {
     String m = server.arg("m");
     if (m == "POINT" || m == "POLYGON") {
@@ -1133,6 +1497,8 @@ void handleSetMode() {
 }
 
 void handleSetTarget() {
+  // A browser prefetch must never change what the operator is logging.
+  if (rejectSpeculative()) return;
   if (server.hasArg("w")) {
     int w = server.arg("w").toInt();
     if      (w == 1) { currentWeed = target1; currentControlType = control1; }
@@ -1145,6 +1511,8 @@ void handleSetTarget() {
 }
 
 void handleForceSync() {
+  // A browser prefetch must never change what the operator is logging.
+  if (rejectSpeculative()) return;
   triggerSync = true;
   lastAction = "Sync Initiated...";
   server.sendHeader("Location", "/");
@@ -1338,6 +1706,69 @@ void handleWifiScan() {
   }
   html += "</div>";
 
+  // Receiver diagnostics, ALWAYS shown. These used to live inside the NMEA feed
+  // panel, which meant turning the phone feed off to save battery also hid the
+  // answer to "is the GPS working". Feed state and receiver state are different
+  // questions and only one of them is optional.
+  html += "<div style='width:86%; margin:0 auto 18px auto; text-align:left; font-size:0.85em; "
+          "background:#2c3e50; padding:12px; border-radius:6px;'>";
+  html += "<b>GNSS receiver</b><br>";
+  html += "Transport: " + htmlEscape(gnssTransport);
+  html += " &nbsp;|&nbsp; PROTVER: ";
+  html += (gnssProtVer.length() ? htmlEscape(gnssProtVer) : String("unknown"));
+  html += "<br>Fix type: " + String(live_fix_type) +
+          " &nbsp;|&nbsp; Satellites: " + String(live_siv) +
+          " &nbsp;|&nbsp; Accuracy: " +
+          (live_accuracy_m > 0.0 ? String(live_accuracy_m, 2) + " m" : String("--"));
+
+  // Restart history. Without this a reboot is invisible: the unit simply
+  // appears with the safety on and no explanation.
+  html += "<br><b>Uptime: </b>" + uptimeText();
+  html += " &nbsp;|&nbsp; <b>Restarts: </b>" + String(bootCount);
+  html += "<br><b>Last restart: </b>";
+  html += (bootWasUnexpected ? "<span style='color:#e74c3c;'>" : "<span style='color:#2ecc71;'>");
+  html += htmlEscape(bootResetReason) + "</span>";
+  if (polyRecoveryNote.length()) {
+    html += "<br><b>Polygon journal: </b><span style='color:#f39c12;'>"
+            + htmlEscape(polyRecoveryNote) + "</span>";
+  }
+  if (speculativeBlocked > 0) {
+    html += "<br><b>Browser prefetches refused: </b><span style='color:#f39c12;'>"
+            + String(speculativeBlocked) + "</span>";
+  }
+
+  // The line this whole panel exists for.
+  html += "<br><b>SBAS corrections: </b>";
+  if (live_diff_soln) {
+    html += "<span style='color:#2ecc71;'>APPLIED NOW</span>";
+  } else if (diffSolnEverSeen) {
+    html += "<span style='color:#f39c12;'>not right now - but seen "
+            + String(diffSolnFirstMs / 1000) + "s after boot</span>";
+  } else {
+    html += "<span style='color:#e74c3c;'>never seen since boot</span>";
+  }
+  html += "<div style='font-size:0.85em; color:#bdc3c7; margin-top:6px;'>";
+  if (live_diff_soln) {
+    html += "The module is using SBAS. This is the 1.0 m CEP regime rather than 1.5 m.";
+  } else if (diffSolnEverSeen) {
+    html += "Corrections have worked, so the module and configuration are fine - "
+            "this is sky view. Expect it to drop under canopy and return in the open.";
+  } else {
+    html += "Give it 10-15 minutes outside with clear sky: the SBAS satellite is "
+            "geostationary and the correction data takes several minutes to download. "
+            "If it never appears, SBAS may need enabling on the module in u-center.";
+  }
+  html += "</div>";
+
+  html += "<br>SouthPAN config: ";
+  html += (sbasConfigOk ? "<span style='color:#2ecc71;'>" : "<span style='color:#e74c3c;'>");
+  html += htmlEscape(sbasConfigDetail) + "</span>";
+  html += "<br>GST enable request: ";
+  if (!gstEnableAttempted)   html += "not attempted";
+  else if (gstEnableOk)      html += "accepted by module";
+  else                       html += "<span style='color:#e74c3c;'>REFUSED by module</span>";
+  html += "</div>";
+
   if (nmeaOut) {
     html += "<div style='width:86%; margin:0 auto 18px auto; text-align:left; font-size:0.85em; "
             "background:#34495e; padding:12px; border-radius:6px;'>";
@@ -1355,12 +1786,6 @@ void handleWifiScan() {
     // does not send GST" from "no NMEA is reaching us at all".
     html += "All types seen: ";
     html += (nmeaTypesSeen.length() ? htmlEscape(nmeaTypesSeen) : String("(none yet)"));
-    html += "<br>GNSS protocol version: ";
-    html += (gnssProtVer.length() ? htmlEscape(gnssProtVer) : String("unknown"));
-    html += "<br>GST enable request: ";
-    if (!gstEnableAttempted)   html += "not attempted";
-    else if (gstEnableOk)      html += "accepted by module";
-    else                       html += "<span style='color:#e74c3c;'>REFUSED by module</span>";
 
     if (nmeaLastSentence.length()) {
       html += "<div style='margin-top:8px; font-family:monospace; font-size:0.85em; color:#95a5a6; word-break:break-all;'>"
@@ -1399,6 +1824,8 @@ void handleWifiScan() {
 // next power cycle. Diagnostics-level, the same as /wifiscan: it turns on a
 // status sentence and cannot affect logged data or expose a credential.
 void handleGstRetry() {
+  // A browser prefetch must never change what the operator is logging.
+  if (rejectSpeculative()) return;
   bool ok = enableGst();
   if (ok) myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_MSGCONF);
 
@@ -2046,11 +2473,30 @@ void syncStoredData() {
 // 12. SETUP
 // ==========================================
 void setup() {
+  // First, before anything else can disturb it: why did we just start?
+  recordBoot();
+
   delay(2500);
   Serial.begin(115200);
   delay(1000);
   Serial.println("\n--- MSA EcoSync Field Booting ---");
   Serial.println("Firmware build: " + String(FIRMWARE_BUILD));
+  Serial.println("Restart #" + String(bootCount) + " - reason: " + bootResetReason);
+  if (bootWasUnexpected) {
+    Serial.println("*** THIS WAS NOT A CLEAN POWER-ON ***");
+    Serial.println("    The safety is ON after every restart, so this is what");
+    Serial.println("    'the safety came on by itself' actually looks like.");
+    if (bootResetCode == (int)ESP_RST_EXT) {
+      Serial.println("    EXTERNAL PIN: something pulled EN low. The Fenix pad's");
+      Serial.println("    wire is on EN, and EN is the reset line - suspect it first.");
+    } else if (bootResetCode == (int)ESP_RST_BROWNOUT) {
+      Serial.println("    BROWNOUT: supply dipped. Suspect the battery connector,");
+      Serial.println("    a tired cell, or a current spike on Wi-Fi transmit.");
+    } else if (bootResetCode == (int)ESP_RST_PANIC) {
+      Serial.println("    CRASH: this one is ours. The exception details are in");
+      Serial.println("    the serial output immediately BEFORE this banner.");
+    }
+  }
 
   pinMode(TRIGGER_PIN, INPUT_PULLUP);
 
@@ -2077,6 +2523,10 @@ void setup() {
     Serial.println("Ready.");
   }
 
+  // Leaves a record on the card of every restart, so a fault in the paddock
+  // with nobody watching is still evidenced afterwards.
+  logBootToSD();
+
   loadConfigFromSD();
 
   // --- Lockout recovery -----------------------------------------------------
@@ -2097,17 +2547,52 @@ void setup() {
     }
   }
 
+  // Drop the clock before anything power-hungry starts. This workload is a 1 Hz
+  // GPS poll and some string building; 240 MHz buys nothing and costs ~20 mA.
+  setCpuFrequencyMhz(cpuMhz);
+  Serial.println("CPU clock set to " + String(getCpuFrequencyMhz()) + " MHz");
+
   loadCaCertFromSD();
   recoverUnsyncedCounts();
+
+  // After the counts are read, so the recovered ring increments an accurate
+  // total rather than being counted twice.
+  recoverPolygonJournal();
   currentWeed        = target1;
   currentControlType = control1;
 
   // --- GPS ---
-  if (myGNSS.begin() == false) {
-    Serial.println("Warning: GPS module not detected.");
+  // Try UART first (DAN-F10N), then fall back to I2C (the older M9). A wiring
+  // fault on a new module must not cost a day's logging: if UART finds nothing
+  // the unit still comes up on whatever is on the I2C bus, and says which.
+  Serial1.begin(GNSS_BAUD, SERIAL_8N1, GNSS_RX_PIN, GNSS_TX_PIN);
+  bool gnssOk = myGNSS.begin(Serial1);
+  if (gnssOk) {
+    gnssTransport = "UART1";
+    Serial.println("GNSS found on UART1 @ " + String(GNSS_BAUD) +
+                   " (RX=" + String(GNSS_RX_PIN) + " TX=" + String(GNSS_TX_PIN) + ")");
   } else {
-    // UBX for our own parsing, NMEA for the phone feed. Both share the bus.
-    myGNSS.setI2COutput(COM_TYPE_UBX | COM_TYPE_NMEA);
+    Serial.println("No GNSS on UART - falling back to I2C...");
+    gnssOk = myGNSS.begin();
+    if (gnssOk) {
+      gnssTransport = "I2C";
+      Serial.println("GNSS found on I2C (the older M9 module).");
+    }
+  }
+
+  if (!gnssOk) {
+    gnssTransport = "none";
+    Serial.println("Warning: GPS module not detected on UART or I2C.");
+    Serial.println("  Check: TXD->GPIO" + String(GNSS_RX_PIN) +
+                   ", RXD->GPIO" + String(GNSS_TX_PIN) + ", 3V3, GND.");
+    Serial.println("  TXD/RXD swapped is the usual cause and does no harm.");
+  } else {
+    // UBX for our own parsing, NMEA for the phone feed. Both share the port.
+    // The port constants differ per transport - setting the I2C port while
+    // talking over UART compiles cleanly, detects the module, and then sends
+    // nothing at all, which looks exactly like a dead module.
+    if (gnssTransport == "UART1") myGNSS.setUART1Output(COM_TYPE_UBX | COM_TYPE_NMEA);
+    else                         myGNSS.setI2COutput(COM_TYPE_UBX | COM_TYPE_NMEA);
     myGNSS.setNMEAOutputPort(nmeaRelay);
 
     // Which module is actually fitted? PROTVER identifies the generation and
@@ -2118,6 +2603,16 @@ void setup() {
                     String(myGNSS.getProtocolVersionLow());
       Serial.println("GNSS protocol version " + gnssProtVer);
     }
+
+    // --- SouthPAN ---
+    // Straight from Geoscience Australia's own receiver configuration guide.
+    //
+    // The one that matters is USE_TESTMODE. SouthPAN broadcasts with the test
+    // mode flag set (SBAS message type 0) and u-blox receivers DISCARD such
+    // corrections by default. The module tracks the satellite perfectly well and
+    // then bins the corrections - which looks exactly like intermittent SBAS
+    // under a clear sky, and cost a day of chasing antenna siting.
+    configureSouthPAN();
 
     // GST carries the accuracy estimate. Without it a phone app shows position
     // but no quality figure, which is exactly what an audit needs recorded.
@@ -2131,7 +2626,10 @@ void setup() {
     // MSGCONF as well as IOPORT. IOPORT alone persists the UBX+NMEA port
     // setting but NOT the message rates, so a GST enable that worked was lost
     // on the next power cycle and had to be re-sent every boot.
-    myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT | VAL_CFG_SUBSEC_MSGCONF);
+    // NAVCONF too, so the SouthPAN settings survive a power cycle rather than
+    // needing to be re-sent on every boot.
+    myGNSS.saveConfigSelective(VAL_CFG_SUBSEC_IOPORT | VAL_CFG_SUBSEC_MSGCONF |
+                               VAL_CFG_SUBSEC_NAVCONF);
     Serial.println("Success: GPS Connected (auto-PVT enabled).");
   }
 
@@ -2144,8 +2642,31 @@ void setup() {
     Serial.println("mDNS responder started at ecosyncfield.local");
   }
 
+  // The WebServer only keeps headers it has been told to collect, and these
+  // are the ones a browser uses to announce that a request is speculative.
+  // The WebServer only retains headers it has been told to collect, and these
+  // are the four a browser uses to announce that a request is speculative.
+  //
+  // This core (3.3.11) declares exactly ONE overload:
+  //     void collectHeaders(const char *headerKeys[], const size_t count);
+  // There is no variadic form here, so the array is not optional.
+  {
+    static const char *speculationHeaders[] = {
+      "Purpose", "X-Purpose", "X-Moz", "Sec-Purpose"
+    };
+    server.collectHeaders(speculationHeaders, 4);
+  }
+
   server.on("/",            HTTP_GET,  handleRoot);
-  server.on("/toggleSafety",HTTP_GET,  handleToggleSafety);
+
+  // Arming and disarming is a state change, so it is POST only.
+  server.on("/toggleSafety",HTTP_POST, handleToggleSafety);
+  // A GET can still arrive from a bookmark, an old link or a scanner. Send it
+  // to the dashboard and change nothing - never 404, never act.
+  server.on("/toggleSafety",HTTP_GET,  []() {
+    server.sendHeader("Location", "/");
+    server.send(303);
+  });
   server.on("/setMode",     HTTP_GET,  handleSetMode);
   server.on("/setTarget",   HTTP_GET,  handleSetTarget);
   server.on("/forceSync",   HTTP_GET,  handleForceSync);

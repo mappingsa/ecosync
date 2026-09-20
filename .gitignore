@@ -12,6 +12,10 @@
 config.txt
 config_new_keys_*.txt
 *config*secret*
+# Credentials for tools/spray_stats.py - ArcGIS username/password or API key.
+tools/spray_stats_config.json
+# Web map JSON backups written by spray_stats.py --setextent
+tools/webmap_backup_*.json
 ca.pem
 
 # ---------- Arduino / arduino-cli build output ----------
@@ -31,6 +35,13 @@ build_out/
 # which has already cost this project an evening once.
 MSA_Weed_Tracker_prod_*/
 MSA_Weed_Tracker_syncfix_*/
+
+# ---------- Delivered copies, not source ----------
+# Files downloaded from the assistant land here. They are SNAPSHOTS of things
+# that already live in firmware/ or docs/, and committing them would put stale
+# copies of the sketch beside the real one - the exact drift this file warns
+# about above, and the thing that cost an evening once already.
+Claude outputs/
 
 # ---------- Logs ----------
 build_log.txt

@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy this to spray_stats_config.json and fill it in. That file is gitignored - keep it that way, it holds credentials.",
+
+  "_auth": "Use EITHER api_key on its own, OR username and password. An api_key must have access to all three services.",
+  "api_key": "",
+
+  "username": "",
+  "password": ""
+}
