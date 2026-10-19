@@ -1,0 +1,62 @@
+=========================================================
+ DAN-F10N raw measurement test
+ Does this module output CARRIER PHASE?
+=========================================================
+
+RAM-only settings. A power cycle undoes everything here.
+
+Access point: EcoSync-RAWX-Test / rawxtest
+Page:         http://192.168.4.1
+
+SD card:      ready
+
+Module identity (UBX-MON-VER):
+  MON-VER:
+    sw: EXT SPGL1L5 6.00 (041e8a)
+    hw: 000A0000
+    ROM BASE 0x6C1C37B0
+    FWVER=SPGL1L5 6.00
+    PROTVER=40.00
+    MOD=DAN-F10N
+    GPS;GAL;BDS
+    SBAS;QZSS
+    NAVIC
+
+Enabling raw output:
+  NMEA output off          key 0x10740002 -> ACK
+  RXM-RAWX on UART1        key 0x209102A5 -> NAK (key not supported)
+  RXM-SFRBX on UART1       key 0x20910232 -> ACK
+
+  NOTE: RAWX was not accepted. That is close to an answer on its
+        own - listening anyway in case it streams regardless.
+
+Listening for 120 seconds. The unit needs a clear view of the sky.
+
+  [  5s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 15s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 25s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 35s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 45s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 55s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 65s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 75s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 85s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [ 95s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [105s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+  [115s] RAWX 0  SFRBX 0  meas 0  with CP 0  bad ck 0
+
+=========================================================
+ RESULT
+=========================================================
+  RXM-RAWX frames    : 0
+  RXM-SFRBX frames   : 0
+  Measurements seen  : 0
+  With carrier phase : 0
+  Bad checksums      : 0
+
+NO RAWX AT ALL.
+This module does not emit raw measurements. Post-processing is off
+the table on this hardware - it would need a receiver built on the
+carrier-phase variant, or an F9-class module.
+=========================================================
+  Run flash.bat to restore the field firmware.

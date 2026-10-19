@@ -66,3 +66,30 @@ desktop.ini
 *~
 .vscode/
 .idea/
+
+# ---------- Added October 2026 ----------
+# Build output for the RAWX test sketch, same reasoning as build_out/ above.
+build_out*/
+
+# Generated analysis output. Both scripts write into their own folders now;
+# these are derived from the layer and can always be rebuilt.
+tools/track_polygons/
+tools/webmap_backup/
+tools/webmap_backups/
+
+# Redacted config. Safe to share by hand, but it still shows the SSID, the
+# device id and the length of every secret, and it has no business in history.
+tools/config_redacted.txt
+
+# Remaining logs. The named ones above missed flash_rawx_log.txt,
+# get_ca_pem_log.txt and end_of_day_log.txt.
+*_log.txt
+
+# Device data pulled off the SD card. Keep a dated COPY in docs/ when a file
+# is evidence of something - bootlog.csv is cited in the README - but the live
+# working copy is not source.
+bootlog.csv
+rejected.csv
+
+# Editor and tool backups.
+*.bak

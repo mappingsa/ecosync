@@ -1,9 +1,15 @@
 {
   "_comment": "Copy this to spray_stats_config.json and fill it in. That file is gitignored - keep it that way, it holds credentials.",
 
-  "_auth": "Use EITHER api_key on its own, OR username and password. An api_key must have access to all three services.",
+  "_auth": "Use EITHER api_key on its own, OR username and password. --setextent edits a portal ITEM, which an api_key cannot do - that needs username and password.",
   "api_key": "",
 
   "username": "",
-  "password": ""
+  "password": "",
+
+  "_webmaps": "Which web map belongs to which job. The script reads the day's Job_Number from the records and picks the matching map, so you cannot accidentally reposition another project's map. Keys must match Job_Number exactly. 'default' is used when a day has no job number at all.",
+  "webmaps": {
+    "DEW NP Weed Control": "997683eecc8e43c4974108e364d2eda2",
+    "default": "d7f8b5123e1b48488faf8b082f4e2393"
+  }
 }

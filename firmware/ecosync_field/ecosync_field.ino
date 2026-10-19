@@ -45,14 +45,21 @@ const char* CONFIG_PATH   = "/config.txt";
 const char* CA_CERT_PATH  = "/ca.pem";
 const char* PENDING_PTS   = "/pending.csv";
 const char* PENDING_POLY  = "/pending_poly.csv";
+// Continuous track points go to their own file and their own layer. One
+// morning of dodder puts hundreds of them in; mixed into the points layer they
+// swamp the spot records and "points captured" on a spray report stops meaning
+// anything. The points layer is WHAT was treated, the track layer is HOW it
+// was covered, and the treated-area polygons are derived from the track.
+const char* PENDING_TRACK = "/pending_track.csv";
 const char* POLY_JOURNAL  = "/poly_journal.txt";
 const char* TMP_PTS       = "/pending.tmp";
 const char* TMP_POLY      = "/pending_poly.tmp";
+const char* TMP_TRACK     = "/pending_track.tmp";
 
 const int   SD_CS_PIN     = 5;
 // Bump this on every build that leaves this machine. It prints at boot and
 // shows on the dashboard, so the version actually running is never in doubt.
-const char* FIRMWARE_BUILD = "20260920-a polygon journal";
+const char* FIRMWARE_BUILD = "20261003-a uart buffer";
 
 const int   TRIGGER_PIN   = 14;
 
@@ -98,17 +105,35 @@ unsigned long diffSolnFirstMs = 0;   // how long after boot corrections first ap
 // Service endpoints. These are not secrets, so they stay in the sketch.
 const char* esriPointServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Points/FeatureServer/0/addFeatures";
 const char* esriPolygonServiceURL = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Polygons/FeatureServer/0/addFeatures";
-const char* currentJobID          = "MSA_EcoSync_001";
+const char* esriTrackServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Track/FeatureServer/0/addFeatures";
+// WHICH UNIT THIS IS.
+//
+// Goes into job_id on every record, which is how two units' work is told
+// apart in ArcGIS - and how track_to_polygons.py keeps their runs separate,
+// since a run_id is only an epoch second and collides across units.
+//
+// It lives in config.txt as device_id so one binary serves every unit. It was
+// a compile-time constant, which meant each unit needed its own build, and
+// flashing the wrong one mislabelled every record it ever uploaded.
+//
+// DEFAULT_DEVICE_ID is the fallback when config.txt has no device_id line -
+// a fresh or reformatted card cannot leave a unit with no identity at all.
+const char* DEFAULT_DEVICE_ID     = "MSA_EcoSync_001";
+String      currentJobID          = DEFAULT_DEVICE_ID;
 
 // Timings
 // polyTimeoutDelay and the point cooldown are configurable - see section 2.
 const unsigned long polySampleInterval   = 1000;   // how often we consider a vertex
 const unsigned long triggerDebounceDelay = 100;
 
-const unsigned long gpsPollInterval      = 200;    // auto-PVT check rate
+// Drain the GNSS UART four times as often. getPVT() is cheap when nothing new
+// has arrived - it reads whatever bytes are waiting and returns - so the only
+// thing a longer interval bought was a fuller receive buffer.
+const unsigned long gpsPollInterval      = 50;     // auto-PVT check rate
 const unsigned long gpsStaleAfter        = 5000;   // fix considered stale after this
 const unsigned long batteryPollInterval  = 15000;
 const unsigned long wifiRetryInterval    = 30000;
+const unsigned long apFallbackMs         = 60000;  // station down this long -> start the AP
 
 // Bounds
 const int MAX_POLY_VERTICES = 1000;   // backstop; auto-splits when reached
@@ -117,9 +142,22 @@ const int POLY_COORD_RESERVE = 4096;  // pre-allocate to limit heap fragmentatio
 // ==========================================
 // 2. CONFIGURABLE SETTINGS (all loaded from /config.txt)
 // ==========================================
-String target1          = "Target A";
-String target2          = "Target B";
-String target3          = "Target C";
+// --- Capture slots -----------------------------------------------------------
+// Each dashboard button owns EVERYTHING about how that weed is captured: name,
+// control method, capture mode, and the two numbers that mode needs. Binding
+// the tuning to the target is the whole point - changing species used to mean
+// editing the cooldown in config, in the field, with gloves on.
+//
+//   POINT       A = cooldown seconds       B = movement that releases it (m)
+//   CONTINUOUS  A = seconds between fixes  B = minimum movement (m), 0 = off
+//   POLYGON     A = vertex spacing (m)     B = idle timeout (s)
+const int NUM_SLOTS = 4;
+String slotWeed[NUM_SLOTS]    = { "Target A", "Target B", "Target C", "Target D" };
+String slotControl[NUM_SLOTS] = { "Foliar Spray", "Foliar Spray", "Foliar Spray", "Foliar Spray" };
+String slotMode[NUM_SLOTS]    = { "POINT", "POINT", "POINT", "CONTINUOUS" };
+float  slotA[NUM_SLOTS]       = { -1.0, -1.0, -1.0, -1.0 };  // -1 = seed from the mode default
+float  slotB[NUM_SLOTS]       = { -1.0, -1.0, -1.0, -1.0 };
+int    currentSlot            = 0;
 String currentJobNumber = "MSA_Job_001";
 
 String wifiSsid   = "";          // blank -> device raises its own access point
@@ -167,18 +205,16 @@ int  nmeaPort = 10110;      // conventional port for NMEA 0183 over TCP
 // at the original value by default so nothing changes unexpectedly.
 float wifiTxDbm      = 8.5;   // 2.0 to 19.5 dBm
 
-// Control method recorded against each target. These are written to the
-// control_type field in ArcGIS. Previously the field was left unset, so ArcGIS
-// applied the layer default ("Cut and Swab", inherited from the Survey123 form).
-String control1 = "Foliar Spray";
-String control2 = "Foliar Spray";
-String control3 = "Foliar Spray";
+// Control method is recorded against each target and written to control_type in
+// ArcGIS. It now lives in slotControl[] beside the weed it belongs to - see the
+// capture slots above.
 
 // ==========================================
 // 3. RUNTIME STATE
 // ==========================================
 int    unsyncedPoints   = 0;
 int    unsyncedPolygons = 0;
+int    unsyncedTrack    = 0;
 String lastSyncStatus   = "Ready for first sync";
 String lastAction       = "System Booted";
 bool   systemArmed      = false;
@@ -234,6 +270,94 @@ unsigned long lastPolySampleTime = 0;
 unsigned long lastTriggerActivity = 0;
 double        lastVertexLat   = 0.0;
 double        lastVertexLon   = 0.0;
+
+// Where the trigger was first pulled. Kept separately from lastVertex* so a
+// polygon too short to be a ring can still be saved as a point whose position
+// and timestamp agree with each other.
+double        polyStartLat    = 0.0;
+double        polyStartLon    = 0.0;
+
+// What actually happened to the polygons this session. The unit is used
+// hands-free, so "did that work?" cannot be answered by watching a screen
+// during the run - it has to be countable afterwards.
+unsigned long polySaved     = 0;   // written as a ring
+unsigned long polyAsPoint   = 0;   // too short to be a ring, kept as a point
+unsigned long polyDiscarded = 0;   // nothing recorded
+
+// --- Continuous capture state ---
+// CONTINUOUS watches the trigger's STATE, not its edge. An edge is a moment,
+// and a moment can fall inside the ~120 ms this loop spends building the
+// dashboard page for a phone - which is how presses went missing. A trigger
+// held for two seconds cannot be missed by anything sampling at 1 ms.
+unsigned long currentRunId      = 0;   // epoch second the trigger went down; 0 = idle
+unsigned long lastContinuousMs  = 0;
+double        lastContinuousLat = 0.0;
+double        lastContinuousLon = 0.0;
+unsigned long continuousPoints  = 0;   // points in the CURRENT run
+unsigned long continuousRuns    = 0;   // runs completed this session
+unsigned long continuousTotal   = 0;   // points written this session
+unsigned long runReleasedAt     = 0;   // millis() the trigger came up; 0 = held
+
+// A run also ends if you have walked this far from its last point while the
+// trigger is up - otherwise a short release hold would merge two infestations
+// you walked between. Fixed rather than configurable: anything tighter than
+// this could be tripped by receiver noise alone at 2-3 m accuracy.
+const float RUN_END_MOVE_M = 15.0;
+
+// --- Trigger latch ---
+// Raised by the pin interrupt so no press can be lost to a slow loop pass. The
+// ISR does nothing else: debouncing happens in loop(), which keeps millis() out
+// of interrupt context entirely.
+volatile bool triggerLatched = false;
+
+void IRAM_ATTR triggerISR() {
+  triggerLatched = true;
+}
+
+// Pulls that did nothing because the safety was on. Previously silent - no
+// counter, no message - so a disarmed unit was indistinguishable from a broken
+// one until you looked at the button.
+unsigned long pullsWhileDisarmed = 0;
+
+// millis() when the station link was last seen up. Drives the access-point
+// fallback in maintainWiFi().
+unsigned long wifiDownSince = 0;
+
+// Retry state. wifiRetryPending marks the gap between dropping a stuck join
+// attempt and starting a fresh one - see maintainWiFi().
+bool          wifiRetryPending = false;
+unsigned long wifiJoinAttempts = 0;
+
+// --- Access point power management ---
+//
+// An AP must stay awake to beacon, so it also blocks modem sleep on the radio.
+// Roughly 45 mA, which on a 2000 mAh cell is about 2.25 %/h - it doubled the
+// unit's drain when the fallback started leaving one up all day out of range.
+//
+// So the AP stops after apIdleStopMin with nobody attached, and then reopens
+// for apWindowSec every apWindowMin so there is always a way back in.
+//
+// The window exists because the trigger gesture cannot be relied on. It is
+// gated on the safety being ON, and the safety is a DASHBOARD control - there
+// is no physical switch. Arm the unit, spray, let the AP idle out, and the only
+// way to disarm is the page you have just lost. The gesture is unreachable in
+// exactly the situation it was written for. A second case it never covered at
+// all: unit happily on Starlink, phone on mobile data, so nothing is "down" and
+// nothing brings the AP back.
+//
+// Hence a window that opens on a clock and needs nobody's cooperation. Two
+// minutes in every fifteen is 13% of 45 mA, about 0.3 %/h, against 2.25 %/h to
+// leave it up. Connect during a window and it stays up - the idle clock takes
+// over from there.
+unsigned long apLastClientMs = 0;    // millis() a client was last attached
+bool          apSuppressed   = false; // idle-stopped; no fallback restart
+unsigned long triggerHeldSince = 0;   // for the summon gesture
+unsigned long apStoppedAt    = 0;    // millis() the AP last went down
+unsigned long apWindowStartedAt = 0; // non-zero while a peek window is open
+float         apIdleStopMin  = 10.0;  // 0 disables the idle shutdown
+float         apWindowMin    = 15.0;  // 0 disables the periodic window
+float         apWindowSec    = 120.0; // how long each window stays open
+const unsigned long AP_SUMMON_HOLD_MS = 5000;
 
 // --- Point de-dup state ---
 double lastPointLat   = 0.0;
@@ -436,6 +560,27 @@ private:
 NmeaRelay nmeaRelay;
 
 // The ESP32 power enum is simply dBm x 4, so this maps cleanly.
+// The access point name this unit uses when config.txt does not set one.
+// Derived from the device id so two units are never both "MSA-EcoSync-Setup" -
+// same name, same password, and a phone silently joins the stronger of the
+// two. You then configure the wrong unit with no error and no clue.
+String defaultApSsid() {
+  String s = currentJobID;
+  s.replace("_", "-");
+  return s + "-Setup";
+}
+
+// mDNS hostname, also derived - both units answering to ecosyncfield.local on
+// the depot network is a fight neither of them wins. "MSA_EcoSync_001" gives
+// ecosync001.local. Anything without a trailing number keeps the old name.
+String mdnsHostname() {
+  int end = currentJobID.length();
+  int start = end;
+  while (start > 0 && isdigit(currentJobID.charAt(start - 1))) start--;
+  if (start == end) return "ecosyncfield";
+  return "ecosync" + currentJobID.substring(start);
+}
+
 wifi_power_t txPowerSetting() {
   float d = wifiTxDbm;
   if (d < 2.0)  d = 2.0;
@@ -491,13 +636,39 @@ static void applyConfigLine(const String &line) {
   String k = line.substring(0, eq);      k.trim();
   String v = line.substring(eq + 1);     v.trim();
 
-  if      (k == "target1")      target1          = v;
-  else if (k == "target2")      target2          = v;
-  else if (k == "target3")      target3          = v;
+  // Slot keys are target1..4, control1..4, mode1..4, tunea1..4, tuneb1..4.
+  // The target/control names are unchanged from the old format, so an existing
+  // config.txt keeps working and simply gains a fourth slot on first save.
+  if (k.startsWith("target") && k.length() == 7) {
+    int i = k.charAt(6) - '1';
+    if (i >= 0 && i < NUM_SLOTS) slotWeed[i] = v;
+  }
+  else if (k.startsWith("control") && k.length() == 8) {
+    int i = k.charAt(7) - '1';
+    if (i >= 0 && i < NUM_SLOTS) slotControl[i] = v;
+  }
+  else if (k.startsWith("mode") && k.length() == 5) {
+    int i = k.charAt(4) - '1';
+    String m = v; m.toUpperCase();
+    if (i >= 0 && i < NUM_SLOTS &&
+        (m == "POINT" || m == "CONTINUOUS" || m == "POLYGON")) slotMode[i] = m;
+  }
+  else if (k.startsWith("tunea") && k.length() == 6) {
+    int i = k.charAt(5) - '1';
+    if (i >= 0 && i < NUM_SLOTS) slotA[i] = v.toFloat();
+  }
+  else if (k.startsWith("tuneb") && k.length() == 6) {
+    int i = k.charAt(5) - '1';
+    if (i >= 0 && i < NUM_SLOTS) slotB[i] = v.toFloat();
+  }
+  else if (k == "device_id")    currentJobID     = v;
   else if (k == "job")          currentJobNumber = v;
   else if (k == "wifi_ssid")    wifiSsid         = v;
   else if (k == "wifi_pass")    wifiPass         = v;
   else if (k == "ap_always")    apAlways         = (v == "1" || v == "true" || v == "yes");
+  else if (k == "ap_idle_stop") apIdleStopMin    = v.toFloat();
+  else if (k == "ap_window_min") apWindowMin     = v.toFloat();
+  else if (k == "ap_window_sec") apWindowSec     = v.toFloat();
   else if (k == "ap_ssid")      apSsid           = v;
   else if (k == "ap_pass")      apPass           = v;
   else if (k == "esri_token")   esriToken        = v;
@@ -515,22 +686,61 @@ static void applyConfigLine(const String &line) {
   else if (k == "wifi_sleep")    wifiSleep        = (v == "1" || v == "true" || v == "yes");
   else if (k == "nmea_out")      nmeaOut          = (v == "1" || v == "true" || v == "yes");
   else if (k == "nmea_port")     nmeaPort         = v.toInt();
-  else if (k == "control1")     control1         = v;
-  else if (k == "control2")     control2         = v;
-  else if (k == "control3")     control3         = v;
 }
 
 static void sanitiseConfig() {
-  if (target1.length() == 0)          target1 = "Target A";
-  if (target2.length() == 0)          target2 = "Target B";
-  if (target3.length() == 0)          target3 = "Target C";
+  const char* defaultWeed[NUM_SLOTS] = { "Target A", "Target B", "Target C", "Target D" };
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    if (slotWeed[i].length() == 0)    slotWeed[i]    = defaultWeed[i];
+    if (slotControl[i].length() == 0) slotControl[i] = "Foliar Spray";
+    if (slotMode[i] != "POINT" && slotMode[i] != "CONTINUOUS" && slotMode[i] != "POLYGON") {
+      slotMode[i] = "POINT";
+    }
+    // A slot with no explicit tuning inherits the old global values, so a card
+    // written by earlier firmware behaves exactly as it did before.
+    if (slotA[i] < 0.0) {
+      if      (slotMode[i] == "POINT")      slotA[i] = pointCooldownS;
+      else if (slotMode[i] == "CONTINUOUS") slotA[i] = 1.0;
+      else                                  slotA[i] = polyMinVertexM;
+    }
+    if (slotB[i] < 0.0) {
+      if      (slotMode[i] == "POINT")      slotB[i] = pointMinDistM;
+      else if (slotMode[i] == "CONTINUOUS") slotB[i] = 8.0;
+      else                                  slotB[i] = polyTimeoutS;
+    }
+    // Bounds. A continuous interval under half a second would flood the card.
+    //
+    // The lower bound on the hold also migrates a card written by the previous
+    // build, where this number meant "minimum movement between fixes" and was
+    // normally 0. Zero is not a sensible release hold, so it becomes 8 s.
+    if (slotMode[i] == "CONTINUOUS") {
+      if (slotA[i] < 0.5 || slotA[i] > 60.0)  slotA[i] = 1.0;
+      if (slotB[i] < 1.0 || slotB[i] > 120.0) slotB[i] = 8.0;
+    } else {
+      if (slotA[i] < 0.0 || slotA[i] > 600.0) slotA[i] = 5.0;
+      if (slotB[i] < 0.0 || slotB[i] > 600.0) slotB[i] = 5.0;
+    }
+  }
+  if (currentSlot < 0 || currentSlot >= NUM_SLOTS) currentSlot = 0;
+
+  // A unit with no identity would upload records that cannot be attributed to
+  // anything, so a blank device_id falls back to the compiled default rather
+  // than being accepted. Spaces and quotes come out because this value is
+  // written into JSON and into an SSID.
+  currentJobID.trim();
+  currentJobID.replace("\"", "");
+  currentJobID.replace(" ", "_");
+  if (currentJobID.length() == 0) currentJobID = DEFAULT_DEVICE_ID;
+
   if (currentJobNumber.length() == 0) currentJobNumber = "MSA_Job_001";
-  if (apSsid.length() == 0)           apSsid = "MSA-EcoSync-Setup";
+  if (apSsid.length() == 0)           apSsid = defaultApSsid();
   if (apPass.length() < 8)            apPass = "msaecosync";   // WPA2 minimum
+  if (apIdleStopMin < 0.0 || apIdleStopMin > 120.0) apIdleStopMin = 10.0;
+  if (apWindowMin   < 0.0 || apWindowMin   > 240.0) apWindowMin   = 15.0;
+  // Below 30 s there is no time to find the SSID and open the page; above ten
+  // minutes it is not a window, it is just an AP with gaps in it.
+  if (apWindowSec  < 30.0 || apWindowSec   > 600.0) apWindowSec   = 120.0;
   if (adminUser.length() == 0)        adminUser = "msa";
-  if (control1.length() == 0)         control1 = "Foliar Spray";
-  if (control2.length() == 0)         control2 = "Foliar Spray";
-  if (control3.length() == 0)         control3 = "Foliar Spray";
   // 15 m is a SANITY limit, not a quality bar. Quality is now recorded per
   // record in gps_accuracy_m and filtered in ArcGIS, where the decision is
   // reversible. A tight gate here throws data away in the scrub, permanently,
@@ -563,17 +773,33 @@ bool saveConfigToSD() {
   f.println("# MSA EcoSync Field configuration");
   f.println("# One key=value per line. Lines starting with # are ignored.");
   f.println("");
-  f.println("target1=" + target1);
-  f.println("target2=" + target2);
-  f.println("target3=" + target3);
-  f.println("job=" + currentJobNumber);
+  f.println("# WHICH UNIT THIS IS. Goes into job_id on every record, and it is");
+  f.println("# what tells two units' work apart in ArcGIS. Change it ONLY when");
+  f.println("# setting up a new unit - changing it on a unit that has already");
+  f.println("# uploaded records splits that unit's history across two names.");
+  f.println("# Blank falls back to the value compiled into the firmware.");
+  f.println("device_id=" + currentJobID);
   f.println("");
-  f.println("# Control method written to the control_type field in ArcGIS,");
-  f.println("# one per target. If control_type uses a coded-value domain, put");
-  f.println("# the CODE here, not the description.");
-  f.println("control1=" + control1);
-  f.println("control2=" + control2);
-  f.println("control3=" + control3);
+  f.println("# One block per dashboard button. control<N> is written to the");
+  f.println("# control_type field in ArcGIS - if that field uses a coded-value");
+  f.println("# domain, put the CODE here, not the description.");
+  f.println("#");
+  f.println("# mode<N> is POINT, CONTINUOUS or POLYGON, and decides what the");
+  f.println("# two tuning numbers mean:");
+  f.println("#   POINT       tunea = cooldown (s)       tuneb = movement that releases it (m)");
+  f.println("#   CONTINUOUS  tunea = seconds per fix    tuneb = release hold (s)");
+  f.println("#               a run also ends after 15 m of movement with the trigger up");
+  f.println("#   POLYGON     tunea = vertex spacing (m) tuneb = idle timeout (s)");
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    String n = String(i + 1);
+    f.println("target"  + n + "=" + slotWeed[i]);
+    f.println("control" + n + "=" + slotControl[i]);
+    f.println("mode"    + n + "=" + slotMode[i]);
+    f.println("tunea"   + n + "=" + String(slotA[i], 1));
+    f.println("tuneb"   + n + "=" + String(slotB[i], 1));
+    f.println("");
+  }
+  f.println("job=" + currentJobNumber);
   f.println("");
   f.println("# Wi-Fi. Leave wifi_ssid blank to force setup access-point mode.");
   f.println("wifi_ssid=" + wifiSsid);
@@ -597,7 +823,19 @@ bool saveConfigToSD() {
   f.println("# ap_pass must be at least 8 characters or the AP will be left open.");
   f.println("# 1 keeps the setup access point running at all times, so the config");
   f.println("# page is reachable even when the unit is joined to Wi-Fi. 0 = only as fallback.");
+  f.println("# ap_always keeps the setup AP up permanently. It costs about 45 mA,");
+  f.println("# roughly 2.25 %/h on a 2000 mAh cell, so leave it off unless you have");
+  f.println("# a reason. ap_idle_stop is minutes with no phone attached before the");
+  f.println("# AP shuts itself down; 0 disables it.");
+  f.println("# Once it has shut down it reopens for ap_window_sec seconds every");
+  f.println("# ap_window_min minutes, so there is always a way back in without the");
+  f.println("# dashboard. 15 min / 120 s costs about 0.3 %/h. 0 disables the window");
+  f.println("# and leaves you with the trigger gesture and a power cycle.");
+  f.println("# Holding the trigger for 5 s with the SAFETY ON also brings it up.");
   f.println("ap_always=" + String(apAlways ? "1" : "0"));
+  f.println("ap_idle_stop=" + String(apIdleStopMin, 1));
+  f.println("ap_window_min=" + String(apWindowMin, 1));
+  f.println("ap_window_sec=" + String(apWindowSec, 0));
   f.println("ap_ssid=" + apSsid);
   f.println("ap_pass=" + apPass);
   f.println("");
@@ -674,9 +912,9 @@ void loadConfigFromSD() {
   f.close();
 
   if (legacy) {
-    if (legacyCount > 0) target1          = legacyLines[0];
-    if (legacyCount > 1) target2          = legacyLines[1];
-    if (legacyCount > 2) target3          = legacyLines[2];
+    if (legacyCount > 0) slotWeed[0]      = legacyLines[0];
+    if (legacyCount > 1) slotWeed[1]      = legacyLines[1];
+    if (legacyCount > 2) slotWeed[2]      = legacyLines[2];
     if (legacyCount > 3) currentJobNumber = legacyLines[3];
     // control1..3 and the timings are new; sanitiseConfig seeds the defaults.
     sanitiseConfig();
@@ -730,18 +968,31 @@ int countRecords(const char *path) {
 void recoverUnsyncedCounts() {
   unsyncedPoints   = countRecords(PENDING_PTS);
   unsyncedPolygons = countRecords(PENDING_POLY);
-  if (unsyncedPoints || unsyncedPolygons) {
+  unsyncedTrack    = countRecords(PENDING_TRACK);
+  if (unsyncedPoints || unsyncedPolygons || unsyncedTrack) {
     Serial.println("Recovered backlog: " + String(unsyncedPoints) + " points, " +
+                   String(unsyncedTrack) + " track, " +
                    String(unsyncedPolygons) + " polygons pending sync.");
-    lastSyncStatus = String(unsyncedPoints) + " pts / " +
-                     String(unsyncedPolygons) + " polys awaiting sync";
+    lastSyncStatus = String(unsyncedPoints) + " pts / " + String(unsyncedTrack) +
+                     " trk / " + String(unsyncedPolygons) + " polys awaiting sync";
   }
 }
 
+// runId groups the points from one trigger squeeze; captureMode says how the
+// record was made (POINT, CONTINUOUS, POLY_SHORT). Both are appended at the END
+// of the line, so a card holding records written by earlier firmware still
+// parses - buildPointFeature simply finds fewer fields and omits the
+// attributes, exactly as it already does for control_type and accuracy.
 bool saveRecordLocally(String weed, double lat, double lon, unsigned long epochTime,
-                       String controlType, double accuracyM) {
+                       String controlType, double accuracyM,
+                       unsigned long runId, const char *captureMode) {
   if (!sdReady) return false;
-  File dataFile = SD.open(PENDING_PTS, FILE_APPEND);
+  // Routed by capture mode, not split later at sync time: a continuous run and
+  // a spot record are different kinds of evidence and go to different layers,
+  // so they are kept apart from the moment they are written. It also means a
+  // track sync failing cannot hold up the spot records.
+  bool isTrack = (strcmp(captureMode, "CONTINUOUS") == 0);
+  File dataFile = SD.open(isTrack ? PENDING_TRACK : PENDING_PTS, FILE_APPEND);
   if (!dataFile) return false;
   // Commas are stripped so the CSV cannot be split incorrectly.
   weed.replace(",", " ");
@@ -749,9 +1000,11 @@ bool saveRecordLocally(String weed, double lat, double lon, unsigned long epochT
   String job = currentJobNumber; job.replace(",", " ");
   dataFile.println(weed + "," + String(lat, 6) + "," + String(lon, 6) + "," +
                    String(epochTime) + "," + job + "," + controlType + "," +
-                   String(accuracyM, 2));
+                   String(accuracyM, 2) + "," +
+                   String(runId) + "," + String(captureMode));
   dataFile.close();
-  unsyncedPoints++;
+  if (isTrack) unsyncedTrack++;
+  else         unsyncedPoints++;
   return true;
 }
 
@@ -885,6 +1138,7 @@ void recoverPolygonJournal() {
   double        worstAcc = 0.0;
   int           verts    = 0;
   bool          haveHeader = false;
+  double        firstLat = 0.0, firstLon = 0.0;   // for the short-ring fallback
 
   while (f.available()) {
     String line = f.readStringUntil('\n');
@@ -909,6 +1163,11 @@ void recoverPolygonJournal() {
       String pair = line.substring(2, p1);
       if (pair.indexOf(',') < 0) continue;
       double a = line.substring(p1 + 1).toFloat();
+      if (verts == 0) {
+        int comma = pair.indexOf(',');
+        firstLon  = pair.substring(0, comma).toDouble();
+        firstLat  = pair.substring(comma + 1).toDouble();
+      }
       coords += pair + ";";
       verts++;
       if (a > worstAcc) worstAcc = a;
@@ -929,15 +1188,60 @@ void recoverPolygonJournal() {
          weed + " (saved, will sync)")
       : ("Found an unfinished polygon of " + String(verts) +
          " vertices but the SAVE FAILED - check the card");
+  } else if (haveHeader && verts >= 1) {
+    // Same reasoning as closePolygon: too short to be a ring, but a spray did
+    // happen and the record has to survive the power loss that got us here.
+    String savedJob  = currentJobNumber;
+    currentJobNumber = job;
+    bool ok = saveRecordLocally(weed, firstLat, firstLon, epoch, control, worstAcc,
+                                epoch, "POLY_SHORT");
+    currentJobNumber = savedJob;
+
+    if (ok) polyAsPoint++;
+    polyRecoveryNote = ok
+      ? ("RECOVERED an unfinished polygon of " + String(verts) +
+         " vertices - too few for a ring, saved as a POINT")
+      : ("Found an unfinished polygon of " + String(verts) +
+         " vertices but the SAVE FAILED - check the card");
   } else if (haveHeader) {
-    polyRecoveryNote = "Unfinished polygon had only " + String(verts) +
-                       " vertices - too few to be a polygon, discarded";
+    polyDiscarded++;
+    polyRecoveryNote = "Unfinished polygon had no usable vertices - discarded";
   } else {
     polyRecoveryNote = "Journal file was present but unreadable - discarded";
   }
 
   Serial.println(polyRecoveryNote);
   SD.remove(POLY_JOURNAL);
+}
+
+// Copy the active slot's mode and tuning into the live globals the capture code
+// already reads. Keeping those globals means the polygon sampler, the point
+// de-duplication and the read-only settings page are all untouched by the move
+// to slots - they carry on reading the same variables they always did.
+void applySlotTuning() {
+  loggingMode = slotMode[currentSlot];
+  if (loggingMode == "POINT") {
+    pointCooldownS = slotA[currentSlot];
+    pointMinDistM  = slotB[currentSlot];
+  } else if (loggingMode == "POLYGON") {
+    polyMinVertexM = slotA[currentSlot];
+    polyTimeoutS   = slotB[currentSlot];
+  }
+  // CONTINUOUS reads slotA/slotB directly - there is no older global to honour.
+}
+
+// A continuous run ends when the trigger is released, the target changes, the
+// safety engages or the mode changes. Nothing is written here: every point was
+// already on the card the moment it was taken, which is the entire reason for
+// capturing this way.
+void endContinuousRun(const char *reason) {
+  if (currentRunId == 0) return;
+  continuousRuns++;
+  Serial.println("--- RUN ENDED (" + String(reason) + "): " +
+                 String(continuousPoints) + " points, id " + String(currentRunId) + " ---");
+  currentRunId     = 0;
+  continuousPoints = 0;
+  runReleasedAt    = 0;
 }
 
 void startPolygonAt(double lat, double lon, unsigned long epoch) {
@@ -955,6 +1259,8 @@ void startPolygonAt(double lat, double lon, unsigned long epoch) {
   vertexCount   = 1;
   lastVertexLat = lat;
   lastVertexLon = lon;
+  polyStartLat  = lat;
+  polyStartLon  = lon;
 
   // The ring is now crash-safe from its very first vertex.
   journalStart(currentPolygonWeed, currentPolygonControl, currentJobNumber, epoch);
@@ -969,11 +1275,34 @@ void closePolygon(const char *reason, bool allowSave) {
   if (allowSave && vertexCount >= 3) {
     if (savePolygonLocally(currentPolygonWeed, currentPolygonCoords, polyStartTime,
                            currentPolygonControl, polyWorstAccM)) {
+      polySaved++;
       lastAction = "Saved polygon, " + String(vertexCount) + " pts (" + reason + ")";
     } else {
       lastAction = "POLYGON SAVE FAILED - check SD card";
     }
-  } else {
+  }
+  // Fewer than three vertices is not a ring - but the operator still sprayed.
+  //
+  // Vertices are considered once a second, so a two-second squeeze on a small
+  // weed produces two of them and the whole event used to be dropped in
+  // silence. On a block of ten small patches worked in quick succession that
+  // was most of the day's records gone, with nothing on the SD card to show
+  // for it. A spray event must never leave no trace, so degrade to a point
+  // rather than discarding: it is the same information the POINT mode would
+  // have captured, and it is a defensible record.
+  else if (allowSave && vertexCount >= 1) {
+    if (saveRecordLocally(currentPolygonWeed, polyStartLat, polyStartLon, polyStartTime,
+                          currentPolygonControl, polyWorstAccM,
+                          polyStartTime, "POLY_SHORT")) {
+      polyAsPoint++;
+      lastAction = "Too short for a polygon (" + String(vertexCount) +
+                   " pts) - saved as a POINT (" + String(reason) + ")";
+    } else {
+      lastAction = "SHORT POLYGON SAVE FAILED - check SD card";
+    }
+  }
+  else {
+    polyDiscarded++;
     lastAction = "Polygon discarded, " + String(vertexCount) + " pts (" + reason + ")";
   }
   Serial.println("--- POLYGON CLOSED: " + String(reason) +
@@ -1053,8 +1382,24 @@ void startAccessPoint() {
   WiFi.mode(WIFI_AP_STA);
   bool ok = WiFi.softAP(apSsid.c_str(), apPass.length() >= 8 ? apPass.c_str() : NULL);
   apMode = true;
+  apSuppressed = false;
+  apLastClientMs = millis();   // grace period before the idle shutdown can fire
   if (ok) Serial.println("Setup access point up: " + apSsid + " at " + WiFi.softAPIP().toString());
   else    Serial.println("Failed to start access point.");
+}
+
+// Take the AP down and return the radio to plain station mode, which is what
+// re-enables modem sleep.
+void stopAccessPoint(const char *why) {
+  if (!apMode) return;
+  WiFi.softAPdisconnect(true);
+  apMode = false;
+  apStoppedAt = millis();
+  if (apStoppedAt == 0) apStoppedAt = 1;   // 0 means "never stopped"
+  apWindowStartedAt = 0;
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(wifiSleep);
+  Serial.println("Access point stopped (" + String(why) + ").");
 }
 
 // Returns true if joined as a station. Falls back to access-point mode so the
@@ -1070,6 +1415,12 @@ bool connectWiFi(unsigned long timeoutMs) {
   // A blocking attempt counts as an attempt, so the background retry does not
   // fire again the moment this one gives up.
   lastWifiAttempt = millis();
+  wifiRetryPending = false;
+
+  // Same reason as the retry in maintainWiFi(): if a join is already in flight
+  // - which it is whenever this is called for new credentials rather than at
+  // boot - esp_wifi refuses the new config and the begin() below is ignored.
+  WiFi.disconnect(false, false);
 
   // Keep the AP alive if it is already up; otherwise station-only.
   WiFi.mode(apMode ? WIFI_AP_STA : WIFI_STA);
@@ -1106,18 +1457,125 @@ bool connectWiFi(unsigned long timeoutMs) {
 // fallen back to the access point, so a unit powered on before Starlink had
 // service stayed offline for the whole day.
 void maintainWiFi() {
-  if (wifiSsid.length() == 0) return;
-  if (WiFi.status() == WL_CONNECTED) return;
-
   unsigned long now = millis();
+
+  // --- Idle shutdown, whatever the station side is doing ---------------------
+  //
+  // Checked FIRST and unconditionally, because the expensive case is precisely
+  // the one where the station never comes back: out of Starlink range the AP
+  // used to stay up all day for nobody, at about 45 mA. Drain went from 2.75
+  // to 5.4 %/h the day that shipped.
+  //
+  // A client attached means someone is using it, so the clock restarts.
+  if (apMode && !apAlways) {
+    if (WiFi.softAPgetStationNum() > 0) {
+      apLastClientMs = now;
+      apWindowStartedAt = 0;      // somebody joined: this is no longer a peek
+    } else if (apWindowStartedAt != 0) {
+      if (now - apWindowStartedAt > (unsigned long)(apWindowSec * 1000.0)) {
+        stopAccessPoint("window closed, nobody joined");
+        apSuppressed = true;
+      }
+    } else if (apIdleStopMin > 0.0 &&
+               now - apLastClientMs > (unsigned long)(apIdleStopMin * 60000.0)) {
+      stopAccessPoint("idle");
+      // Do not let the fallback below bring it straight back - the window
+      // below is what reopens it, on a clock.
+      apSuppressed = true;
+    }
+  }
+
+  // --- Periodic window -------------------------------------------------------
+  //
+  // Runs BEFORE the connected check on purpose. The case that needs it most is
+  // not "out of range" - it is the unit sitting happily on Starlink while the
+  // phone is on mobile data, where nothing is down and nothing would otherwise
+  // bring the AP back.
+  if (!apMode && !apAlways && apWindowMin > 0.0 && apStoppedAt != 0 &&
+      now - apStoppedAt > (unsigned long)(apWindowMin * 60000.0)) {
+    Serial.println("Access point window opening for " + String(apWindowSec, 0) + "s.");
+    startAccessPoint();                    // clears apSuppressed, sets apLastClientMs
+    apWindowStartedAt = millis();
+    if (apWindowStartedAt == 0) apWindowStartedAt = 1;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiDownSince = 0;
+    // Station side is back and nobody is on the AP - no reason to keep it.
+    // Unless a window is open, which would otherwise be closed the instant it
+    // opened whenever the unit had a link.
+    if (apMode && !apAlways && apWindowStartedAt == 0 &&
+        WiFi.softAPgetStationNum() == 0) {
+      stopAccessPoint("station link restored");
+    }
+    return;
+  }
+
+  if (wifiSsid.length() == 0) return;
+
+  if (wifiDownSince == 0) {
+    wifiDownSince = now;
+    // The link has just gone down. Whatever suppression an earlier idle
+    // shutdown left behind is stale - losing the network is a new reason to
+    // want the AP, and waiting up to a whole window for it would be worse than
+    // the behaviour this replaced. Cleared only on the transition, so a unit
+    // that is out of range all day still idles its AP down and stays down.
+    apSuppressed = false;
+  }
+
+  // Start the access point once the station side has been down for a while.
+  //
+  // THIS is what stranded the unit in the field. The AP was only ever started
+  // from connectWiFi(), which runs at boot. Switch on inside Starlink range and
+  // the join succeeds, so no AP is started; drive out of range and this
+  // function retried a network that was not there, every 30 seconds, forever -
+  // leaving no interface to connect to at all. The reverse case (booted out of
+  // range, AP up, network appears later) was fixed long ago; this direction
+  // never was.
+  if (!apMode && !apSuppressed && now - wifiDownSince > apFallbackMs) {
+    Serial.println("Station down " + String((now - wifiDownSince) / 1000) +
+                   "s - starting fallback access point.");
+    startAccessPoint();
+  }
+
   if (now - lastWifiAttempt < wifiRetryInterval) return;
   lastWifiAttempt = now;
 
   wifiLastStatus = WiFi.status();
   wifiLastError  = String(wifiStatusName(wifiLastStatus));
 
-  Serial.println("Wi-Fi not connected (" + wifiLastError + ") - retrying " + wifiSsid);
+  // The retry has to DISCONNECT before it can begin again.
+  //
+  // esp_wifi keeps auto-reconnecting on its own, so the station is almost
+  // always mid-attempt when this fires. WiFi.begin() then calls
+  // esp_wifi_set_config(), the driver refuses it -
+  //
+  //     E (79892) wifi:sta is connecting, cannot set config
+  //
+  // - and the retry does nothing at all. Every 30 seconds, forever. The log
+  // said "retrying Jimmys" each time and never actually retried anything.
+  //
+  // Worse, it takes the access point down with it. AP_STA shares one radio, so
+  // the softAP follows the station's channel; a station stuck in a permanent
+  // connect-and-scan cycle drags the radio off-channel often enough that the
+  // AP's beacons go missing and the SSID never appears in anyone's Wi-Fi list.
+  // That is why the unit was unreachable BOTH ways at the house.
+  //
+  // Two passes: drop the attempt, then begin a second later once the
+  // disconnect has actually landed.
   if (!apMode) WiFi.mode(WIFI_STA);
+
+  if (!wifiRetryPending) {
+    WiFi.disconnect(false, false);        // STA only; leaves the AP alone
+    wifiRetryPending = true;
+    lastWifiAttempt  = now - wifiRetryInterval + 1000;   // come back in 1 s
+    return;
+  }
+  wifiRetryPending = false;
+
+  wifiJoinAttempts++;
+  Serial.println("Wi-Fi not connected (" + wifiLastError + ") - retrying " +
+                 wifiSsid + " [attempt " + String(wifiJoinAttempts) + "]");
   WiFi.setTxPower(txPowerSetting());
   WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
 }
@@ -1374,7 +1832,16 @@ void handleRoot() {
   html += "</head><body>";
 
   html += "<p style='text-align: right; margin: 0 20px 5px 0; color: " + batColor + "; font-size: 0.9em;'>\xF0\x9F\x94\x8B " + batText + "</p>";
-  html += "<h3 style='color:black; margin: 0; font-size: 0.9em; letter-spacing: 1px;'>MSA ECOSYNC FIELD</h3>";
+  // The unit id, not the access point name.
+  //
+  // This is the SAME constant the uploader stamps into job_id on every record,
+  // so it cannot disagree with the data. An SSID can: it lives on the SD card,
+  // and a card copied to a second unit with the right name but the wrong
+  // binary flashed would read "002" while posting everything as 001. Shown
+  // beside the build for the same reason - between them, a unit that is not
+  // what you think it is becomes obvious instead of silent.
+  html += "<h3 style='color:black; margin: 0; font-size: 0.9em; letter-spacing: 1px;'>" +
+          String(currentJobID) + "</h3>";
   html += "<p style='color:black; margin:0; font-size:0.6em; opacity:0.7;'>" + String(FIRMWARE_BUILD) + "</p>";
   html += "<h1 style='margin-bottom: 5px; margin-top: 5px;'>" + statusText + "</h1>";
 
@@ -1401,20 +1868,38 @@ void handleRoot() {
   html += "<h3 style='color:black; margin-bottom: 2px;'>Active Target: " + htmlEscape(currentWeed) + "</h3>";
   html += "<h4 style='color:white; margin: 0 0 5px 0; font-size:0.8em;'>Control: " + htmlEscape(currentControlType) + "</h4>";
   html += "<h4 style='color:white; margin-top: 0; margin-bottom: 5px;'>Job Number: " + htmlEscape(currentJobNumber) + "</h4>";
-  html += "<h4 style='color:black; margin-top: 0; margin-bottom: 10px;'>Mode: " + loggingMode + (polygonActive ? " (RECORDING " + String(vertexCount) + " pts)" : "") + "</h4>";
+  html += "<h4 style='color:black; margin-top: 0; margin-bottom: 10px;'>Mode: " + loggingMode;
+  if (polygonActive)  html += " (RECORDING " + String(vertexCount) + " pts)";
+  if (currentRunId)   html += " (RUN: " + String(continuousPoints) + " pts)";
+  html += "</h4>";
 
-  String nextMode = (loggingMode == "POINT") ? "POLYGON" : "POINT";
-  html += "<a href='/setMode?m=" + nextMode + "' style='background-color:#d35400; color:white; padding:8px 15px; text-decoration:none; border-radius:5px; display:inline-block; font-size: 0.85em; margin-bottom:10px;'>Switch to " + nextMode + " Mode</a><br>";
-
-  html += "<div style='margin: 5px 0;'>";
-  html += "<a href='/setTarget?w=1' style='background-color:#2980b9; color:white; padding:8px; margin:4px; text-decoration:none; border-radius:5px; display:inline-block; font-size: 0.85em;'>" + htmlEscape(target1) + "<br><span style='font-size:0.75em; opacity:0.85;'>" + htmlEscape(control1) + "</span></a>";
-  html += "<a href='/setTarget?w=2' style='background-color:#2980b9; color:white; padding:8px; margin:4px; text-decoration:none; border-radius:5px; display:inline-block; font-size: 0.85em;'>" + htmlEscape(target2) + "<br><span style='font-size:0.75em; opacity:0.85;'>" + htmlEscape(control2) + "</span></a>";
-  html += "<a href='/setTarget?w=3' style='background-color:#2980b9; color:white; padding:8px; margin:4px; text-decoration:none; border-radius:5px; display:inline-block; font-size: 0.85em;'>" + htmlEscape(target3) + "<br><span style='font-size:0.75em; opacity:0.85;'>" + htmlEscape(control3) + "</span></a>";
+  // 2x2 grid, and the capture mode lives on the button.
+  //
+  // There is deliberately no separate POINT/POLYGON toggle any more. Two
+  // controls that can disagree about what you are recording is one control too
+  // many for a gloved thumb at arm's length - and it was the source of the
+  // "switched mode and lost my weed" confusion. Want the same weed captured two
+  // ways? Give it two slots.
+  html += "<div style='display:flex; flex-wrap:wrap; justify-content:center; margin:5px auto; width:94%;'>";
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    bool active = (i == currentSlot);
+    html += "<a href='/setTarget?w=" + String(i + 1) + "' style='flex:0 0 44%; background-color:";
+    html += active ? "#1abc9c" : "#2980b9";
+    html += "; color:white; padding:10px 4px; margin:3px; text-decoration:none; border-radius:8px; border:3px solid ";
+    html += active ? "white" : "transparent";
+    html += "; font-size:0.9em; font-weight:bold;'>";
+    html += htmlEscape(slotWeed[i]);
+    html += "<br><span style='font-size:0.72em; font-weight:normal; opacity:0.9;'>" + htmlEscape(slotControl[i]) + "</span>";
+    html += "<br><span style='font-size:0.68em; font-weight:normal; opacity:0.75;'>" + slotMode[i] + "</span>";
+    html += "</a>";
+  }
   html += "</div>";
 
   html += "<hr style='width:80%; border-color:white; margin: 10px auto;'>";
-  html += "<p style='font-size: 0.75em; margin:0;'>Unsynced Points / Polygons:</p>";
-  html += "<h2 style='font-size: 2em; margin: 0;'>" + String(unsyncedPoints) + " Pts / " + String(unsyncedPolygons) + " Polys</h2><br>";
+  html += "<p style='font-size: 0.75em; margin:0;'>Unsynced:</p>";
+  html += "<h2 style='font-size: 1.7em; margin: 0;'>" + String(unsyncedPoints) + " Pts";
+  if (unsyncedTrack) html += " / " + String(unsyncedTrack) + " Trk";
+  html += " / " + String(unsyncedPolygons) + " Polys</h2><br>";
   html += "<a href='/forceSync' style='background-color:#8e44ad; color:white; padding:12px 25px; text-decoration:none; border-radius:8px; display:inline-block; border:2px solid white; font-size: 0.9em;'>SYNC TO ESRI</a><br><br>";
 
   // Refused pulls must be impossible to miss. The whole product is hands-free,
@@ -1425,8 +1910,47 @@ void handleRoot() {
     html += "<b>" + String(rejectedPulls) + " trigger pull";
     html += (rejectedPulls == 1 ? " was" : "s were");
     html += " NOT logged</b><br>Last reason: " + htmlEscape(lastRejectReason);
-    html += "<br>Raise the accuracy limit under Advanced if this keeps happening.";
+    // Say something TRUE for the reason that actually fired. The old text
+    // told you to raise the accuracy limit whatever the cause, which for a
+    // stale fix is useless advice - and acting on it only admits worse points.
+    if (lastRejectReason.indexOf("stale") >= 0) {
+      html += "<br>The fix shown above is the last one that arrived. Nothing "
+              "new has reached the unit for 5 s, so position cannot be trusted. "
+              "Raising the accuracy limit will NOT help this.";
+    } else if (lastRejectReason.indexOf("No GPS fix") >= 0) {
+      html += "<br>No fix at all. Check the sky view.";
+    } else {
+      html += "<br>Raise the accuracy limit under Advanced if this keeps happening.";
+    }
     html += "</div>";
+  }
+
+  // Polygon outcomes this session. Spraying is hands-free, so the operator
+  // cannot watch the screen while it happens - the only way to know whether
+  // the settings are working is to be able to count afterwards.
+  if (polySaved || polyAsPoint || polyDiscarded || continuousRuns || continuousTotal) {
+    html += "<p style='font-size: 0.75em; color:black; margin:6px 0 0 0;'>Captured this session:</p>";
+    html += "<p style='color:black; font-size:0.85em; margin:2px 0 8px 0;'>";
+    bool first = true;
+    if (continuousRuns || continuousTotal) {
+      html += String(continuousRuns) + " runs / " + String(continuousTotal) + " pts";
+      first = false;
+    }
+    if (polySaved) {
+      if (!first) html += " &middot; ";
+      html += String(polySaved) + " polygons";
+      first = false;
+    }
+    if (polyAsPoint) {
+      if (!first) html += " &middot; ";
+      html += "<b>" + String(polyAsPoint) + " too short, kept as points</b>";
+      first = false;
+    }
+    if (polyDiscarded) {
+      if (!first) html += " &middot; ";
+      html += "<b style='color:#7b241c;'>" + String(polyDiscarded) + " lost</b>";
+    }
+    html += "</p>";
   }
 
   html += "<p style='font-size: 0.75em; color:black; margin:0;'>Last Action:</p>";
@@ -1444,6 +1968,51 @@ void handleRoot() {
   html += " &nbsp;|&nbsp; presses since boot: " + String(triggerPresses);
   html += " &nbsp;|&nbsp; loop " + String(loopLastMs) + "ms (max " + String(loopMaxMs) + "ms)";
   html += " &nbsp;|&nbsp; " + String(systemArmed ? "ARMED" : "<b>SAFETY ON</b>");
+  // Not a warning. Arming the safety to spray something you do not want
+  // recorded is a normal way to work, so this reports rather than scolds.
+  if (pullsWhileDisarmed > 0) {
+    html += " &nbsp;|&nbsp; " + String(pullsWhileDisarmed) + " pulls not logged (safety)";
+  }
+  html += "</p>";
+
+  // Say out loud how long this page will stay reachable. You are reading it on
+  // the AP, so "the AP shuts down in 4 minutes" is information you can act on -
+  // and if you are inside a two-minute window, you very much want to know.
+  if (apMode && !apAlways) {
+    html += "<p style='font-size: 0.7em; color:black; font-weight:normal; margin:0 0 4px 0;'>";
+    if (apWindowStartedAt != 0) {
+      long left = (long)(apWindowSec * 1000.0) - (long)(millis() - apWindowStartedAt);
+      html += "Access point <b>window</b>: closes in " + String(left > 0 ? left / 1000 : 0) +
+              "s unless you stay connected";
+    } else if (apIdleStopMin > 0.0) {
+      long left = (long)(apIdleStopMin * 60000.0) - (long)(millis() - apLastClientMs);
+      html += "Access point shuts down " + String(left > 0 ? left / 60000 + 1 : 0) +
+              " min after the last phone disconnects";
+      if (apWindowMin > 0.0) html += ", then reopens every " + String(apWindowMin, 0) + " min";
+    }
+    html += "</p>";
+  }
+
+  // Restarts and battery drain belong where they will actually be seen. The
+  // restart count was buried on /wifiscan, which is no use for spotting a unit
+  // that rebooted mid-run - and the fuel gauge reports %/h directly, which the
+  // firmware read and then threw away on a lightning-bolt icon.
+  html += "<p style='font-size: 0.7em; color:black; font-weight:normal; margin:0 0 4px 0;'>";
+  html += "Restarts: " + String(bootCount);
+  if (bootWasUnexpected) html += " <b>(last: " + htmlEscape(bootResetReason) + ")</b>";
+  if (batteryOk) {
+    html += " &nbsp;|&nbsp; Battery " + String(live_battery_pct) + "%";
+    if (live_charge_rate < -0.05) {
+      float hrs = (float)live_battery_pct / (-live_charge_rate);
+      html += " (" + String(-live_charge_rate, 1) + " %/h, ~" + String(hrs, 1) + " h left)";
+    } else if (live_charge_rate > 0.5) {
+      html += " (charging " + String(live_charge_rate, 1) + " %/h)";
+    }
+  }
+  html += " &nbsp;|&nbsp; AP " + String(apMode ? "up" : "off");
+  // Self-documenting, because the one time you need the gesture is the one
+  // time you cannot read this page.
+  if (!apMode) html += " (hold trigger 5s, safety on)";
   html += "</p>";
 
   html += "<p style='font-size: 0.7em; color:black; font-weight:normal; margin:0 0 10px 0;'>";
@@ -1478,20 +2047,12 @@ void handleToggleSafety() {
   server.send(303);
 }
 
+// Retired. Capture mode is a property of the target slot now, so this endpoint
+// changes nothing - it exists only so an old bookmark or a phone that cached
+// the previous dashboard gets a redirect instead of a 404.
 void handleSetMode() {
-  // A browser prefetch must never change what the operator is logging.
   if (rejectSpeculative()) return;
-  if (server.hasArg("m")) {
-    String m = server.arg("m");
-    if (m == "POINT" || m == "POLYGON") {
-      bool closedPolygon = polygonActive;
-      if (polygonActive) closePolygon("mode changed", true);
-      loggingMode = m;
-      // Append rather than overwrite, so the save confirmation is not lost.
-      if (closedPolygon) lastAction += " | Mode: " + loggingMode;
-      else               lastAction = "Mode changed to: " + loggingMode;
-    }
-  }
+  lastAction = "Mode follows the target now - pick a button.";
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -1501,10 +2062,18 @@ void handleSetTarget() {
   if (rejectSpeculative()) return;
   if (server.hasArg("w")) {
     int w = server.arg("w").toInt();
-    if      (w == 1) { currentWeed = target1; currentControlType = control1; }
-    else if (w == 2) { currentWeed = target2; currentControlType = control2; }
-    else if (w == 3) { currentWeed = target3; currentControlType = control3; }
-    lastAction = "Target: " + currentWeed + " (" + currentControlType + ")";
+    int s = w - 1;
+    if (s >= 0 && s < NUM_SLOTS) {
+      // Switching target also switches capture mode, so anything in flight has
+      // to be closed against the target it was STARTED with, not the new one.
+      if (polygonActive) closePolygon("target changed", true);
+      endContinuousRun("target changed");
+      currentSlot        = s;
+      currentWeed        = slotWeed[s];
+      currentControlType = slotControl[s];
+      applySlotTuning();
+      lastAction = "Target: " + currentWeed + " (" + currentControlType + ") - " + loggingMode;
+    }
   }
   server.sendHeader("Location", "/");
   server.send(303);
@@ -1580,13 +2149,49 @@ void handleConfig() {
   String html = pageHead("Field Setup");
   html += "<form action='/saveConfig' method='POST'>";
 
-  html += "<h3>TARGETS &amp; CONTROL METHOD</h3>";
-  html += textField("Target 1", "t1", target1, false, "");
-  html += textField("Target 1 control method", "c1", control1, false, "");
-  html += textField("Target 2", "t2", target2, false, "");
-  html += textField("Target 2 control method", "c2", control2, false, "");
-  html += textField("Target 3", "t3", target3, false, "");
-  html += textField("Target 3 control method", "c3", control3, false, "");
+  html += "<h3>CAPTURE SLOTS</h3>";
+  html += "<div style='font-size:0.7em; color:#bdc3c7; margin:-6px 0 12px 0; padding:0 8%;'>"
+          "Each dashboard button carries its own weed, control method, capture mode and timing. "
+          "Setting the timing here is what stops you editing it in the field.</div>";
+
+  const char* modeNames[3] = { "POINT", "CONTINUOUS", "POLYGON" };
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    String n  = String(i + 1);
+    String fT = "t" + n, fC = "c" + n, fM = "m" + n, fA = "a" + n, fB = "b" + n;
+
+    html += "<h4 style='margin:16px 0 4px 0; color:#1abc9c;'>SLOT " + n + "</h4>";
+    html += textField("Weed / target", fT.c_str(), slotWeed[i], false, "");
+    html += textField("Control method", fC.c_str(), slotControl[i], false, "");
+
+    html += "<label>Capture mode</label><br>";
+    html += "<select name='" + fM + "' style='padding:10px; margin-bottom:4px; width:82%; font-size:1em; text-align:center;'>";
+    for (int m = 0; m < 3; m++) {
+      html += "<option value='" + String(modeNames[m]) + "'";
+      if (slotMode[i] == modeNames[m]) html += " selected";
+      html += ">" + String(modeNames[m]) + "</option>";
+    }
+    html += "</select>";
+    html += "<div style='font-size:0.7em; color:#bdc3c7; margin-bottom:12px;'>"
+            "POINT = one record per pull. CONTINUOUS = a record every few seconds while held. "
+            "POLYGON = walk the perimeter.</div>";
+
+    String hintA, hintB;
+    if (slotMode[i] == "POINT") {
+      hintA = "Cooldown on the same spot (s)";
+      hintB = "Movement that logs early (m). 0 = plain timer.";
+    } else if (slotMode[i] == "CONTINUOUS") {
+      hintA = "Seconds between fixes while the trigger is held";
+      hintB = "Release hold (s) - how long the trigger can be up before the run ends. "
+              "Releasing and pulling again on the same weed keeps one run.";
+    } else {
+      hintA = "Distance travelled before a new vertex (m)";
+      hintB = "Trigger silence that closes the polygon (s)";
+    }
+    html += textField("Timing A", fA.c_str(), String(slotA[i], 1), false, hintA.c_str());
+    html += textField("Timing B", fB.c_str(), String(slotB[i], 1), false, hintB.c_str());
+  }
+  html += "<div style='font-size:0.7em; color:#bdc3c7; margin:0 0 12px 0; padding:0 8%;'>"
+          "Save, then reopen this page to see the timing labels update for a mode you just changed.</div>";
 
   html += "<h3>JOB</h3>";
   html += textField("Job Number (ID)", "job", currentJobNumber, false, "");
@@ -1618,20 +2223,43 @@ void handleConfig() {
 // it must never touch connectivity or capture tuning - otherwise a hand-crafted
 // POST here would bypass the password on /advanced entirely.
 void handleSaveConfig() {
-  if (server.hasArg("t1"))  target1          = argTrimmed("t1");
-  if (server.hasArg("t2"))  target2          = argTrimmed("t2");
-  if (server.hasArg("t3"))  target3          = argTrimmed("t3");
-  if (server.hasArg("c1"))  control1         = argTrimmed("c1");
-  if (server.hasArg("c2"))  control2         = argTrimmed("c2");
-  if (server.hasArg("c3"))  control3         = argTrimmed("c3");
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    String n  = String(i + 1);
+    String fT = "t" + n, fC = "c" + n, fM = "m" + n, fA = "a" + n, fB = "b" + n;
+
+    if (server.hasArg(fT.c_str())) slotWeed[i]    = argTrimmed(fT.c_str());
+    if (server.hasArg(fC.c_str())) slotControl[i] = argTrimmed(fC.c_str());
+
+    String oldMode = slotMode[i];
+    if (server.hasArg(fM.c_str())) {
+      String m = argTrimmed(fM.c_str()); m.toUpperCase();
+      if (m == "POINT" || m == "CONTINUOUS" || m == "POLYGON") slotMode[i] = m;
+    }
+
+    if (slotMode[i] != oldMode) {
+      // The two numbers mean different things in different modes, so carrying
+      // a cooldown of 10 over into "seconds between fixes" would be nonsense.
+      // Blank them and let sanitiseConfig seed the new mode's defaults.
+      slotA[i] = -1.0;
+      slotB[i] = -1.0;
+    } else {
+      if (server.hasArg(fA.c_str())) slotA[i] = argTrimmed(fA.c_str()).toFloat();
+      if (server.hasArg(fB.c_str())) slotB[i] = argTrimmed(fB.c_str()).toFloat();
+    }
+  }
   if (server.hasArg("job")) currentJobNumber = argTrimmed("job");
 
   sanitiseConfig();
 
-  // A target rename mid-polygon would otherwise mislabel the saved feature.
+  // A target rename mid-capture would otherwise mislabel the saved feature.
   if (polygonActive) closePolygon("config changed", true);
-  currentWeed        = target1;
-  currentControlType = control1;
+  endContinuousRun("config changed");
+
+  // Re-derive from the slot that is ACTUALLY selected. This used to snap back
+  // to slot 1 on every save, which is why the active weed kept reverting.
+  currentWeed        = slotWeed[currentSlot];
+  currentControlType = slotControl[currentSlot];
+  applySlotTuning();
 
   if (saveConfigToSD()) lastAction = "Field setup saved.";
   else                  lastAction = "CONFIG SAVE FAILED - check SD card";
@@ -1853,6 +2481,15 @@ void handleAdvanced() {
   }
   html += "<form action='/saveAdvanced' method='POST'>";
 
+  // Shown, not editable. This is the unit's identity and it ends up on every
+  // record it uploads; a typo made on a phone in the field would quietly
+  // mislabel a day's work. Changing it is a deliberate act on the SD card.
+  html += "<h3>THIS UNIT</h3>";
+  html += roRow("Device ID", currentJobID);
+  html += roRow("Hostname", mdnsHostname() + ".local");
+  html += "<div style='font-size:0.75em; color:#95a5a6; margin:0 auto 14px auto; width:80%;'>"
+          "Written to job_id on every record. Set device_id in config.txt on the SD card.</div>";
+
   html += "<h3>WI-FI</h3>";
   html += textField("Wi-Fi Network (SSID)", "wssid", wifiSsid, false, "Leave blank to stay in setup access-point mode");
   html += secretField("Wi-Fi Password", "wpass", wifiPass.length() > 0, "");
@@ -1870,9 +2507,15 @@ void handleAdvanced() {
   html += "<div style='font-size:0.8em; margin-bottom:10px;'><label><input type='checkbox' name='apalways' value='1'";
   html += apAlways ? " checked" : "";
   html += "> Keep the setup access point running at all times</label>"
-          "<div style='font-size:0.85em; color:#bdc3c7; padding:0 8%;'>Recommended. The config page stays reachable even when the unit is on Wi-Fi, so you never depend on finding its address.</div></div>";
+          "<div style='font-size:0.85em; color:#bdc3c7; padding:0 8%;'>Costs about 45 mA, roughly 2.25 %/h on a 2000 mAh cell - it is the single biggest thing you can switch off. Leave it unticked and use the idle shutdown and window below.</div></div>";
   html += textField("AP Name", "apssid", apSsid, false, "");
   html += secretField("AP Password", "appass", apPass.length() > 0, "Minimum 8 characters. Blank keeps the current one.");
+  html += textField("AP idle shutdown (min)", "apidle", String(apIdleStopMin, 1), false,
+                    "Minutes with no phone connected before the access point switches itself off, to save about 2.25 %/h. 0 = never.");
+  html += textField("AP window every (min)", "apwinmin", String(apWindowMin, 1), false,
+                    "After it shuts down, the access point reopens on this cycle so you can always get back in - including when the unit is on Wi-Fi and your phone is on mobile data. 0 = never reopen.");
+  html += textField("AP window length (s)", "apwinsec", String(apWindowSec, 0), false,
+                    "How long each window stays open. 30 to 600. Connect during one and it stays up. 15 min / 120 s costs about 0.3 %/h.");
 
   html += "<h3>ARCGIS</h3>";
   html += secretField("API Key / Token", "token", esriToken.length() > 0,
@@ -1925,6 +2568,9 @@ void handleSaveAdvanced() {
   if (server.hasArg("wpass")  && server.arg("wpass").length()  > 0) wifiPass  = argTrimmed("wpass");
   if (server.hasArg("apssid")) apSsid         = argTrimmed("apssid");
   if (server.hasArg("appass") && argTrimmed("appass").length() > 0) apPass    = argTrimmed("appass");
+  if (server.hasArg("apidle")) apIdleStopMin  = argTrimmed("apidle").toFloat();
+  if (server.hasArg("apwinmin")) apWindowMin  = argTrimmed("apwinmin").toFloat();
+  if (server.hasArg("apwinsec")) apWindowSec  = argTrimmed("apwinsec").toFloat();
   if (server.hasArg("token")  && server.arg("token").length()  > 0) esriToken = argTrimmed("token");
   if (server.hasArg("auser"))  adminUser      = argTrimmed("auser");
   if (server.hasArg("apassw") && argTrimmed("apassw").length() > 0) adminPass = argTrimmed("apassw");
@@ -1936,6 +2582,11 @@ void handleSaveAdvanced() {
   if (server.hasArg("pmind"))  pointMinDistM  = argTrimmed("pmind").toFloat();
 
   sanitiseConfig();
+
+  // Ticking "keep the AP up" while the AP happens to be down did nothing:
+  // nothing in maintainWiFi() starts one while the station side is connected.
+  // Easy to miss before, because the AP was almost always up already.
+  if (apAlways && !apMode) startAccessPoint();
 
   if (saveConfigToSD()) lastAction = "Advanced settings saved.";
   else                  lastAction = "CONFIG SAVE FAILED - check SD card";
@@ -2112,12 +2763,28 @@ int simplifyPolyline(double *xs, double *ys, int n, double epsMetres) {
     }
   }
 
+  // Count survivors BEFORE touching the arrays.
+  //
+  // The previous version compacted first and then returned the original n when
+  // fewer than 3 vertices survived - "never simplify a polygon out of
+  // existence". But the compaction had already run: xs[0] held the first
+  // vertex and xs[1] had been OVERWRITTEN with the last, while xs[2..n-1] were
+  // still the untouched originals. The caller then built a ring from n
+  // vertices whose second point was the final one - scrambled, usually
+  // self-intersecting, and rejected outright by ArcGIS.
+  //
+  // It only fired when fewer than 3 vertices survived, which is exactly the
+  // case of a small patch: nothing on a 1 m ring deviates more than a 2 m
+  // tolerance from the chord, so every one of them hit this path.
+  int kept = 0;
+  for (int i = 0; i < n; i++) if (keep[i]) kept++;
+  if (kept < 3) return n;              // arrays untouched, caller gets the original
+
   int m = 0;
   for (int i = 0; i < n; i++) {
     if (keep[i]) { xs[m] = xs[i]; ys[m] = ys[i]; m++; }
   }
-  // Never simplify a polygon out of existence.
-  return (m >= 3) ? m : n;
+  return m;
 }
 
 // ------------------------------------------------------------------
@@ -2138,16 +2805,29 @@ String buildPointFeature(const String &line) {
   // from earlier firmware simply have fewer fields and still upload, just
   // without those attributes. Never require a field a stored record may lack.
   int c5 = line.indexOf(',', c4 + 1);
-  String jobNumber, controlType, accuracyStr;
+  String jobNumber, controlType, accuracyStr, runIdStr, captureMode;
   if (c5 < 0) {
     jobNumber = line.substring(c4 + 1);
   } else {
     jobNumber = line.substring(c4 + 1, c5);
     int c6 = line.indexOf(',', c5 + 1);
     if (c6 < 0) { controlType = line.substring(c5 + 1); }
-    else        { controlType = line.substring(c5 + 1, c6);
-                  accuracyStr = line.substring(c6 + 1); }
+    else {
+      controlType = line.substring(c5 + 1, c6);
+      // run_id (8th) and capture_mode (9th) are newer again. Same rule: a
+      // record written before they existed still uploads, just without them.
+      int c7 = line.indexOf(',', c6 + 1);
+      if (c7 < 0) { accuracyStr = line.substring(c6 + 1); }
+      else {
+        accuracyStr = line.substring(c6 + 1, c7);
+        int c8 = line.indexOf(',', c7 + 1);
+        if (c8 < 0) { runIdStr = line.substring(c7 + 1); }
+        else        { runIdStr    = line.substring(c7 + 1, c8);
+                      captureMode = line.substring(c8 + 1); }
+      }
+    }
   }
+  captureMode.trim();
 
   // Reject null island and out-of-range coordinates.
   if (lat == 0.0 && lon == 0.0) return "";
@@ -2165,6 +2845,12 @@ String buildPointFeature(const String &line) {
   if (accuracyStr.length() > 0) {
     double a = accuracyStr.toDouble();
     if (a > 0.0) attrs += ",\"gps_accuracy_m\":" + String(a, 2);
+  }
+  if (runIdStr.length() > 0 && runIdStr != "0") {
+    attrs += ",\"run_id\":\"" + jsonEscape(runIdStr) + "\"";
+  }
+  if (captureMode.length() > 0) {
+    attrs += ",\"capture_mode\":\"" + jsonEscape(captureMode) + "\"";
   }
 
   String f = "{\"geometry\":{\"x\":" + String(lon, 6) +
@@ -2228,11 +2914,39 @@ String buildPolygonFeature(const String &line) {
 
   if (n < 3) return "";
 
-  // Strip GPS jitter before anything else looks at the shape.
-  int before = n;
-  n = simplifyPolyline(xs, ys, n, (double)polySimplifyM);
-  if (n != before) {
-    Serial.println("Polygon smoothed: " + String(before) + " -> " + String(n) + " vertices.");
+  // Strip GPS jitter before anything else looks at the shape - but only where
+  // there is enough shape to strip.
+  //
+  // Douglas-Peucker discards any vertex closer than the tolerance to the line
+  // between its neighbours. On a ring whose whole extent is comparable to that
+  // tolerance, EVERY vertex qualifies, so smoothing stops being noise removal
+  // and becomes demolition. Golden dodder patches run about a metre across
+  // against a 2 m default tolerance, which is well inside that.
+  //
+  // So measure the ring first and leave small ones alone. Their outline is
+  // mostly receiver noise either way; that is a limit of the hardware, not
+  // something a smoothing pass can repair, and an untouched ring at least
+  // reports honestly.
+  double minX = xs[0], maxX = xs[0], minY = ys[0], maxY = ys[0];
+  for (int i = 1; i < n; i++) {
+    if (xs[i] < minX) minX = xs[i];
+    if (xs[i] > maxX) maxX = xs[i];
+    if (ys[i] < minY) minY = ys[i];
+    if (ys[i] > maxY) maxY = ys[i];
+  }
+  double spanY = (maxY - minY) * 111320.0;
+  double spanX = (maxX - minX) * 111320.0 * cos(ys[0] * 0.017453292519943295);
+  double ringSpanM = (spanX > spanY) ? spanX : spanY;
+
+  if (polySimplifyM > 0.0 && ringSpanM < polySimplifyM * 4.0) {
+    Serial.println("Polygon " + String(ringSpanM, 1) + "m across - too small for a " +
+                   String(polySimplifyM, 1) + "m tolerance, smoothing skipped.");
+  } else {
+    int before = n;
+    n = simplifyPolyline(xs, ys, n, (double)polySimplifyM);
+    if (n != before) {
+      Serial.println("Polygon smoothed: " + String(before) + " -> " + String(n) + " vertices.");
+    }
   }
 
   // ArcGIS requires outer rings in CLOCKWISE order; counter-clockwise is read
@@ -2449,21 +3163,25 @@ void syncStoredData() {
 
   // Points and polygons sync independently -- a failure in one does not
   // prevent the other from being uploaded.
-  bool okPts  = syncPendingFile(PENDING_PTS, TMP_PTS,
-                                esriPointServiceURL, false, unsyncedPoints, client);
-  bool okPoly = syncPendingFile(PENDING_POLY, TMP_POLY,
-                                esriPolygonServiceURL, true, unsyncedPolygons, client);
+  bool okPts   = syncPendingFile(PENDING_PTS, TMP_PTS,
+                                 esriPointServiceURL, false, unsyncedPoints, client);
+  bool okTrack = syncPendingFile(PENDING_TRACK, TMP_TRACK,
+                                 esriTrackServiceURL, false, unsyncedTrack, client);
+  bool okPoly  = syncPendingFile(PENDING_POLY, TMP_POLY,
+                                 esriPolygonServiceURL, true, unsyncedPolygons, client);
 
-  if (okPts && okPoly) {
+  if (okPts && okTrack && okPoly) {
     lastSyncStatus = "SUCCESS!";
-    Serial.println("All Points and Polygons Synced Successfully!");
-  } else if (!okPts && !okPoly) {
-    lastSyncStatus = "SYNC ERROR - " + String(unsyncedPoints) + " pts / " +
-                     String(unsyncedPolygons) + " polys left";
-  } else if (!okPts) {
-    lastSyncStatus = "POINT SYNC ERROR - " + String(unsyncedPoints) + " left";
+    Serial.println("All Points, Track and Polygons Synced Successfully!");
   } else {
-    lastSyncStatus = "POLY SYNC ERROR - " + String(unsyncedPolygons) + " left";
+    // Name what is still on the card rather than just which call failed - the
+    // number left is what decides whether it is safe to end the day.
+    String left = "";
+    if (!okPts)   left += String(unsyncedPoints) + " pts ";
+    if (!okTrack) left += String(unsyncedTrack) + " trk ";
+    if (!okPoly)  left += String(unsyncedPolygons) + " polys ";
+    left.trim();
+    lastSyncStatus = "SYNC ERROR - " + left + " left";
   }
 
   Serial.println("--- Sync finished: " + lastSyncStatus + " ---");
@@ -2529,6 +3247,14 @@ void setup() {
 
   loadConfigFromSD();
 
+  // AFTER the card is read, not with the build banner above. device_id comes
+  // from config.txt, so printing it earlier would have shown the compiled
+  // fallback and told you the opposite of the truth on any unit whose identity
+  // lives on its card - which, now, is all of them.
+  Serial.println("Unit:           " + currentJobID +
+                 "   (goes into job_id on every record)");
+  Serial.println("Reachable at:   " + mdnsHostname() + ".local  /  AP " + apSsid);
+
   // --- Lockout recovery -----------------------------------------------------
   // Hold the spray trigger while powering on to clear the config-page password.
   // Physical access already implies access to the SD card, so this grants
@@ -2558,13 +3284,38 @@ void setup() {
   // After the counts are read, so the recovered ring increments an accurate
   // total rather than being counted twice.
   recoverPolygonJournal();
-  currentWeed        = target1;
-  currentControlType = control1;
+  currentSlot        = 0;
+  currentWeed        = slotWeed[0];
+  currentControlType = slotControl[0];
+  applySlotTuning();
+
+  // Latch the trigger in hardware. The pin used to be read once per pass of
+  // loop(), and a pass can stretch to ~120 ms while the dashboard page is
+  // built for a phone - so a quick squeeze that opened and closed inside that
+  // window was invisible: no record, no counter, no message. An interrupt
+  // cannot be outrun by a slow loop.
+  attachInterrupt(digitalPinToInterrupt(TRIGGER_PIN), triggerISR, FALLING);
 
   // --- GPS ---
   // Try UART first (DAN-F10N), then fall back to I2C (the older M9). A wiring
   // fault on a new module must not cost a day's logging: if UART finds nothing
   // the unit still comes up on whatever is on the I2C bus, and says which.
+  // 2 KB of RX buffer, not the 256-byte default. MUST be before begin().
+  //
+  // This is the bug behind "GPS data stale" with a perfect fix on screen.
+  // The module streams NMEA plus UBX NAV-PVT at 1 Hz, and NMEA GSV grows with
+  // the satellite count - at 20+ satellites it is well over a kilobyte a
+  // second. The loop drains that buffer in pollGPS(), which ran every 200 ms:
+  // 256 bytes at ~1.3 KB/s fills in under 200 ms, so the buffer was at its
+  // limit by design and any loop pass over that mark overflowed it. An
+  // overflow drops bytes mid-frame, the UBX checksum fails, getPVT() returns
+  // false, lastGpsUpdate stops advancing - and five seconds later every
+  // trigger pull is refused as stale while the dashboard shows 1.3 m and 21
+  // satellites, because those came from the last frame that did get through.
+  //
+  // More satellites makes it worse, which is why a good day in open country
+  // was the day it showed up.
+  Serial1.setRxBufferSize(2048);
   Serial1.begin(GNSS_BAUD, SERIAL_8N1, GNSS_RX_PIN, GNSS_TX_PIN);
   bool gnssOk = myGNSS.begin(Serial1);
   if (gnssOk) {
@@ -2618,6 +3369,25 @@ void setup() {
     // but no quality figure, which is exactly what an audit needs recorded.
     enableGst();
 
+    // Silence the module's NMEA when nobody is listening to it.
+    //
+    // The NMEA feed to phone apps is a RELAY of the receiver's own sentences,
+    // so NMEA has to stay on when nmea_out is set. With the feed off, every
+    // one of those sentences is pure load on a 38400 baud link shared with
+    // the UBX frames the unit actually runs on - roughly two thirds of the
+    // traffic, discarded on arrival.
+    //
+    // Key 0x10740002 is CFG-UART1OUTPROT-NMEA, written as a literal so this
+    // does not depend on the library exposing a constant for it. Applied at
+    // boot only: changing nmea_out needs a restart to take effect.
+    if (!nmeaOut) {
+      if (myGNSS.setVal8(0x10740002, 0)) {
+        Serial.println("GNSS NMEA output disabled (nmea_out is off) - frees the UART for UBX.");
+      } else {
+        Serial.println("Could not disable GNSS NMEA output; continuing with it on.");
+      }
+    }
+
     myGNSS.setNavigationFrequency(1);
     // Auto-PVT: the module streams position on its own schedule and getPVT()
     // becomes a non-blocking check for fresh data.
@@ -2638,8 +3408,26 @@ void setup() {
   // is reachable even if the Wi-Fi join then succeeds.
   if (apAlways) startAccessPoint();
   connectWiFi(15000);
-  if (MDNS.begin("ecosyncfield")) {
-    Serial.println("mDNS responder started at ecosyncfield.local");
+  if (MDNS.begin(mdnsHostname().c_str())) {
+    Serial.println("mDNS responder started at " + mdnsHostname() + ".local");
+  }
+
+  // Start the window clock even when the AP never came up.
+  //
+  // apStoppedAt is set by stopAccessPoint(), and the periodic window will not
+  // open while it is zero. A unit that joins Wi-Fi cleanly at boot never
+  // starts an AP at all, so it never stopped one, so no window would EVER
+  // open - on exactly the unit that most needs one, because the only other
+  // way in is an address you can see on the serial monitor and nowhere else.
+  //
+  // Found on 002's first boot: joined, no AP, and no window coming.
+  if (!apMode && apStoppedAt == 0) {
+    apStoppedAt = millis();
+    if (apStoppedAt == 0) apStoppedAt = 1;
+    if (apWindowMin > 0.0) {
+      Serial.println("No access point at boot - first window in " +
+                     String(apWindowMin, 0) + " min.");
+    }
   }
 
   // The WebServer only keeps headers it has been told to collect, and these
@@ -2738,18 +3526,58 @@ void loop() {
   int  readTriggerRaw = digitalRead(TRIGGER_PIN);
   bool triggerFired   = false;
 
+  // A HELD trigger is activity too.
+  //
+  // lastTriggerActivity used to be touched only by an accepted PRESS, so the
+  // idle timeout measured time since the last edge rather than time since the
+  // last spraying. Hold the trigger down for longer than polyTimeoutS - which
+  // is ordinary when working a patch - and the polygon closed underneath you
+  // mid-spray, with the next pull opening a fresh one. One continuous run came
+  // back as two or more fragments, and any fragment short enough fell through
+  // the vertex test and vanished.
+  if (polygonActive && systemArmed && readTriggerRaw == LOW) {
+    lastTriggerActivity = currentMillis;
+  }
+
+  // --- Summon the access point ---------------------------------------------
+  //
+  // Hold the trigger for five seconds with the SAFETY ON.
+  //
+  // Disarmed means it cannot be confused with spraying, and the trigger is the
+  // one control still to hand in the situation this exists for: out of range,
+  // AP shut down for idleness, and the dashboard is exactly the thing you do
+  // not have. There is no way to ask for it through a screen you cannot reach.
+  if (!systemArmed && readTriggerRaw == LOW) {
+    if (triggerHeldSince == 0) {
+      triggerHeldSince = currentMillis;
+    } else if (!apMode && currentMillis - triggerHeldSince > AP_SUMMON_HOLD_MS) {
+      startAccessPoint();
+      lastAction = "Access point ON: " + apSsid + " / " + WiFi.softAPIP().toString();
+      triggerHeldSince = 0;
+    }
+  } else {
+    triggerHeldSince = 0;
+  }
+
+  // The INTERRUPT is now the authority on "a press happened". Debouncing stays
+  // here rather than in the ISR, which keeps millis() out of interrupt context
+  // - the ISR does nothing but raise a flag.
+  if (triggerLatched) {
+    triggerLatched = false;
+    triggerPresses++;
+    if (currentMillis - lastAcceptedPress > triggerDebounceDelay) {
+      lastAcceptedPress = currentMillis;
+      triggerFired = true;
+    }
+  }
+
   if (readTriggerRaw != lastTriggerRaw) {
     lastTriggerDebounce = currentMillis;
     triggerRawChanges++;
-    if (readTriggerRaw == LOW) {
-      triggerPresses++;
-      if (currentMillis - lastAcceptedPress > triggerDebounceDelay) {
-        lastAcceptedPress = currentMillis;
-        triggerFired = true;
-      }
-    }
     // Deliberately unconditional: this prints even when disarmed, so silence
-    // here means the pin is not moving at all.
+    // here means the pin is not moving at all. The polled edge count is kept
+    // purely as a cross-check - if it drifts from the interrupt count, the pad
+    // is bouncing rather than the loop being slow.
     Serial.println("Trigger pin -> " + String(readTriggerRaw == LOW ? "LOW (pressed)" : "HIGH (released)") +
                    "  [changes=" + String(triggerRawChanges) +
                    " presses=" + String(triggerPresses) +
@@ -2761,9 +3589,121 @@ void loop() {
   lastTriggerRaw     = readTriggerRaw;
   stableTriggerState = readTriggerRaw;   // kept so the dashboard can show it
 
+  // --- CONTINUOUS capture ---------------------------------------------------
+  //
+  // Level-triggered, and that is the whole point. An edge is a moment, and a
+  // moment can fall inside the ~120 ms this loop spends building the dashboard
+  // for a phone - which is how squeezes went missing. A trigger held for two
+  // seconds cannot be missed by anything sampling at 1 ms, so a pad that drops
+  // the occasional clean closure stops mattering.
+  //
+  // Every point is on the card the instant it is taken. Nothing is held in
+  // memory waiting to be "finished", so there is no ring to lose.
+  if (loggingMode == "CONTINUOUS") {
+    bool held = (readTriggerRaw == LOW);
+
+    if (held && systemArmed) {
+      runReleasedAt = 0;          // spraying again; the release hold is moot
+      if (currentRunId == 0) {
+        if (gpsUsable()) {
+          currentRunId      = live_epoch;   // the run's identity IS its start time
+          continuousPoints  = 0;
+          lastContinuousMs  = 0;            // 0 means "take one now"
+          lastContinuousLat = 0.0;
+          lastContinuousLon = 0.0;
+          lastAction = "RUN STARTED: " + currentWeed;
+          Serial.println("--- RUN STARTED id " + String(currentRunId) + " ---");
+        } else if (currentMillis - lastContinuousMs > 1000) {
+          // Throttled, because this branch is reached on every pass of a 1 ms
+          // loop and rebuilding the string that often would churn the heap.
+          lastContinuousMs = currentMillis;
+          lastRejectReason = gpsRejectReason();
+          lastAction = "RUN not started - " + lastRejectReason;
+        }
+      }
+
+      if (currentRunId != 0) {
+        unsigned long everyMs = (unsigned long)(slotA[currentSlot] * 1000.0);
+        if (everyMs < 500) everyMs = 500;
+
+        if (lastContinuousMs == 0 || currentMillis - lastContinuousMs >= everyMs) {
+          lastContinuousMs = currentMillis;
+
+          if (!gpsUsable()) {
+            lastRejectReason = gpsRejectReason();
+            lastAction = "RUN: fix unusable - " + lastRejectReason;
+          } else {
+            // No distance gate. Standing still working one patch is exactly
+            // when you want the points - that is the ground being treated.
+            if (saveRecordLocally(currentWeed, live_lat, live_lon, live_epoch,
+                                  currentControlType, live_accuracy_m,
+                                  currentRunId, "CONTINUOUS")) {
+              continuousPoints++;
+              continuousTotal++;
+              lastContinuousLat = live_lat;
+              lastContinuousLon = live_lon;
+              lastAction = "RUN: " + String(continuousPoints) + " pts, " + currentWeed;
+            } else {
+              lastAction = "RUN SAVE FAILED - check SD card";
+            }
+          }
+        }
+      }
+    }
+    else if (currentRunId != 0) {
+      if (!systemArmed) {
+        endContinuousRun("safety engaged");
+      } else {
+        // THE RELEASE HOLD.
+        //
+        // Working one dodder patch means letting go and pulling again several
+        // times - around a tree, changing direction, repositioning. Those are
+        // one infestation and have to share one run_id, or the buffer-and-
+        // dissolve downstream turns one patch into five fragments.
+        //
+        // On 25 September the median run was a SINGLE point: 169 runs for 289
+        // points. The spatial merge still collapsed them to 39 sensible
+        // treated areas, so the hectares were right - but which squeeze
+        // covered which ground was lost, and that is the provenance a
+        // compliance record is supposed to carry.
+        //
+        // Two ways out of a run: the trigger has been up long enough, or you
+        // have walked far enough that you are plainly at the next weed.
+        if (runReleasedAt == 0) runReleasedAt = currentMillis;
+
+        float holdS = slotB[currentSlot];
+        if (holdS < 1.0) holdS = 8.0;
+
+        bool timeUp = (currentMillis - runReleasedAt) > (unsigned long)(holdS * 1000.0);
+        bool movedOn = false;
+        if (gpsUsable() && continuousPoints > 0) {
+          movedOn = metresBetween(lastContinuousLat, lastContinuousLon,
+                                  live_lat, live_lon) > RUN_END_MOVE_M;
+        }
+
+        if      (timeUp)  endContinuousRun("released");
+        else if (movedOn) endContinuousRun("moved on");
+      }
+    }
+  }
+  else if (currentRunId != 0) {
+    endContinuousRun("mode changed");
+  }
+
   {
     {
-      if (triggerFired && systemArmed) {
+      // A pull while disarmed used to do nothing at all - no counter, no
+      // message - so a safety left on looked exactly like a broken pad.
+      if (triggerFired && !systemArmed) {
+        pullsWhileDisarmed++;
+        lastAction = "SAFETY ON - " + String(pullsWhileDisarmed) +
+                     String(pullsWhileDisarmed == 1 ? " pull" : " pulls") + " not logged";
+      }
+
+      // CONTINUOUS is handled above, on the trigger's state. A press edge here
+      // would double-count it and, worse, would count a refused fix as a
+      // rejected pull once a second.
+      if (triggerFired && systemArmed && loggingMode != "CONTINUOUS") {
 
         // Nothing is recorded without a fix we trust.
         if (!gpsUsable()) {
@@ -2788,7 +3728,8 @@ void loop() {
           if (!hasLoggedPoint || timeReleased || moveReleased) {
             lastLogTime = currentMillis;
             if (saveRecordLocally(currentWeed, live_lat, live_lon, live_epoch,
-                                  currentControlType, live_accuracy_m)) {
+                                  currentControlType, live_accuracy_m,
+                                  live_epoch, "POINT")) {
               lastPointLat   = live_lat;
               lastPointLon   = live_lon;
               hasLoggedPoint = true;
