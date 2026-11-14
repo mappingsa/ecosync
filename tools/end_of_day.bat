@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM  MSA EcoSync - end of field day.
+REM  FPE EcoSync - end of field day.
 REM
 REM  Replaces the Runs.txt checklist. Finds the day's jobs itself, builds the
 REM  treated-area polygons, then runs the statistics once per job.

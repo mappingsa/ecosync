@@ -1,6 +1,6 @@
 /*
   ==================================================================================
-  Mapping Services Australia - MSA EcoSync Field System
+  FieldPoint Environmental - FPE EcoSync Field System
   Production Software: Auto-Timeout Polygon Logic + Web Config + ESRI Sync
   Board: SparkFun Thing Plus - ESP32 WROOM (USB-C)
   Wiring: Spray Trigger (Pressure Pad) -> Pin 14 and GND
@@ -42,6 +42,16 @@
 // 1. CONSTANTS
 // ==========================================
 const char* CONFIG_PATH   = "/config.txt";
+const char* CONFIG_TMP    = "/config.tmp";   // half-written config lives here
+const char* CONFIG_BAK    = "/config.bak";   // last known-good copy
+const char* LASTPOINT_PATH = "/lastpoint.txt";
+// Smallest plausible config. A file shorter than this is a truncated write, not
+// a configuration, and must never be promoted over a good one.
+const size_t CONFIG_MIN_BYTES = 200;
+// How stale the saved last-point may be and still suppress a press. Long enough
+// to cover a reboot mid-bush, short enough that yesterday's last plant cannot
+// swallow this morning's first one.
+const unsigned long LASTPOINT_MAX_AGE_S = 600;
 const char* CA_CERT_PATH  = "/ca.pem";
 const char* PENDING_PTS   = "/pending.csv";
 const char* PENDING_POLY  = "/pending_poly.csv";
@@ -55,11 +65,15 @@ const char* POLY_JOURNAL  = "/poly_journal.txt";
 const char* TMP_PTS       = "/pending.tmp";
 const char* TMP_POLY      = "/pending_poly.tmp";
 const char* TMP_TRACK     = "/pending_track.tmp";
+// LINE mode. A polyline is a ring that never closes: bait trails, and the
+// "effort line" a Board logs to say which roads have actually been driven.
+const char* PENDING_LINE  = "/pending_line.csv";
+const char* TMP_LINE      = "/pending_line.tmp";
 
 const int   SD_CS_PIN     = 5;
 // Bump this on every build that leaves this machine. It prints at boot and
 // shows on the dashboard, so the version actually running is never in doubt.
-const char* FIRMWARE_BUILD = "20261003-a uart buffer";
+const char* FIRMWARE_BUILD = "20261114-k map colour by target";
 
 const int   TRIGGER_PIN   = 14;
 
@@ -103,9 +117,15 @@ bool        diffSolnEverSeen  = false;
 unsigned long diffSolnFirstMs = 0;   // how long after boot corrections first applied
 
 // Service endpoints. These are not secrets, so they stay in the sketch.
-const char* esriPointServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Points/FeatureServer/0/addFeatures";
-const char* esriPolygonServiceURL = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Polygons/FeatureServer/0/addFeatures";
-const char* esriTrackServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Track/FeatureServer/0/addFeatures";
+// Destination layers. These were hardcoded until 28 Oct, which meant a unit
+// could only ever post to one organisation's layers - a reflash per client, and
+// no way to point a trial unit at a test service. They are now config.txt keys
+// with these as the defaults, so an empty or missing key keeps today's
+// behaviour exactly.
+String esriPointServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Points/FeatureServer/0/addFeatures";
+String esriPolygonServiceURL = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Polygons/FeatureServer/0/addFeatures";
+String esriTrackServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/MSA_Weed_Spray_Track/FeatureServer/0/addFeatures";
+String esriLineServiceURL    = "https://services2.arcgis.com/2qaBxVgMaOYvQXaU/arcgis/rest/services/Weed_Spray_Lines/FeatureServer/0/addFeatures";
 // WHICH UNIT THIS IS.
 //
 // Goes into job_id on every record, which is how two units' work is told
@@ -118,13 +138,29 @@ const char* esriTrackServiceURL   = "https://services2.arcgis.com/2qaBxVgMaOYvQX
 //
 // DEFAULT_DEVICE_ID is the fallback when config.txt has no device_id line -
 // a fresh or reformatted card cannot leave a unit with no identity at all.
-const char* DEFAULT_DEVICE_ID     = "MSA_EcoSync_001";
+const char* DEFAULT_DEVICE_ID     = "FPE_EcoSync_001";
 String      currentJobID          = DEFAULT_DEVICE_ID;
 
 // Timings
 // polyTimeoutDelay and the point cooldown are configurable - see section 2.
 const unsigned long polySampleInterval   = 1000;   // how often we consider a vertex
-const unsigned long triggerDebounceDelay = 100;
+// Lockout after an ACCEPTED press.
+//
+// Was 100 ms, which is enough for contact chatter while the pad is being
+// pressed but not for the bounce when it springs back. A bench run of 42
+// deliberate press-release cycles on 24 October 2026 produced 50 interrupt
+// fires - the extras all arriving on the RELEASE, 200-400 ms after the real
+// press and so clear of a 100 ms window.
+//
+// No records were ever duplicated by this: the point cooldown suppressed every
+// one as "same plant". But it inflated the press counter on the dashboard,
+// which is the first number anyone reaches for to sanity-check a day, and it
+// would become real duplicates under a short enough cooldown.
+//
+// 250 ms covers the release bounce and is still far quicker than anyone can
+// deliberately press twice. A triple-press gesture would need about 750 ms,
+// which is a natural fast tap-tap-tap.
+const unsigned long triggerDebounceDelay = 250;
 
 // Drain the GNSS UART four times as often. getPVT() is cheap when nothing new
 // has arrived - it reads whatever bytes are waiting and returns - so the only
@@ -137,6 +173,18 @@ const unsigned long apFallbackMs         = 60000;  // station down this long -> 
 
 // Bounds
 const int MAX_POLY_VERTICES = 1000;   // backstop; auto-splits when reached
+
+// ONE pair of vertex buffers, shared by the polygon and the line builder.
+//
+// They were separate when LINE was added, which quietly took another 16 KB of
+// static DRAM - 2 x 1000 doubles - away from a heap that TLS was already
+// competing for. The symptom was not a crash: the first upload batch went
+// through and every one after it failed with send-payload and connection-lost
+// errors, because there was no longer enough free heap to stand up a second
+// TLS session. Nothing calls both builders at once; syncPendingFile works one
+// queue at a time, so sharing is safe.
+static double shapeXs[MAX_POLY_VERTICES];
+static double shapeYs[MAX_POLY_VERTICES];
 const int POLY_COORD_RESERVE = 4096;  // pre-allocate to limit heap fragmentation
 
 // ==========================================
@@ -158,17 +206,31 @@ String slotMode[NUM_SLOTS]    = { "POINT", "POINT", "POINT", "CONTINUOUS" };
 float  slotA[NUM_SLOTS]       = { -1.0, -1.0, -1.0, -1.0 };  // -1 = seed from the mode default
 float  slotB[NUM_SLOTS]       = { -1.0, -1.0, -1.0, -1.0 };
 int    currentSlot            = 0;
-String currentJobNumber = "MSA_Job_001";
+String currentJobNumber = "FPE_Job_001";
 
+// Two networks, tried in turn.
+//
+// Slot 1 is the vehicle's Starlink; slot 2 is the operator's phone hotspot.
+// Both matter, for different reasons. An officer who joins the UNIT's access
+// point to see the dashboard loses internet on the phone, so Field Maps stops
+// working - and checking a board's weed observation in the field is half the
+// job. Inverting it fixes that: the unit joins the phone, the phone keeps
+// cellular, and both the dashboard and Field Maps work at once.
+//
+// Alternating attempts rather than scanning: a blocking scan costs a second or
+// more of the loop, and each join attempt already has its own timeout.
 String wifiSsid   = "";          // blank -> device raises its own access point
 String wifiPass   = "";
+String wifiSsid2  = "";          // phone hotspot
+String wifiPass2  = "";
+int    wifiSlot   = 0;           // which of the two the next attempt uses
 bool   apAlways   = true;         // keep the setup AP up even when joined to Wi-Fi,
                                  // so the config page is always reachable
-String apSsid     = "MSA-EcoSync-Setup";
-String apPass     = "msaecosync"; // must be at least 8 chars or the AP is open
+String apSsid     = "FPE-EcoSync-Setup";
+String apPass     = "fpeecosync"; // must be at least 8 chars or the AP is open
 
 String esriToken  = "";          // optional ArcGIS API key / token; blank = anonymous
-String adminUser  = "msa";
+String adminUser  = "fpe";
 String adminPass  = "";          // blank disables config-page auth
 
 float  gpsMaxAccM       = 5.0;   // reject logging above this horizontal accuracy
@@ -215,6 +277,7 @@ float wifiTxDbm      = 8.5;   // 2.0 to 19.5 dBm
 int    unsyncedPoints   = 0;
 int    unsyncedPolygons = 0;
 int    unsyncedTrack    = 0;
+int    unsyncedLines    = 0;
 String lastSyncStatus   = "Ready for first sync";
 String lastAction       = "System Booted";
 bool   systemArmed      = false;
@@ -231,6 +294,10 @@ bool   sdReady          = false;
 String        bootResetReason   = "unknown";
 int           bootResetCode     = 0;
 bool          bootWasUnexpected = false;   // anything other than a clean power-on
+// Separate from the flag above on purpose. Dismissing the banner must not
+// erase WHY the unit restarted - that figure is still wanted on the
+// diagnostics page and in the boot log long after the notice has been read.
+bool          bootNoticeDismissed = false;
 unsigned long bootCount         = 0;
 Preferences   bootPrefs;
 
@@ -261,6 +328,11 @@ float live_charge_rate = 0.0;
 
 // --- Polygon state ---
 bool          polygonActive   = false;
+// LINE reuses the whole polygon machinery - vertex gating, the crash journal,
+// the simplifier - because a line IS a ring minus the closing step. This flag
+// is the only thing that differs while one is being recorded, and it is pinned
+// at the start so changing mode mid-capture cannot turn a line into a ring.
+bool          shapeIsLine     = false;
 String        currentPolygonCoords   = "";
 String        currentPolygonWeed     = "";
 String        currentPolygonControl  = "";
@@ -308,10 +380,39 @@ const float RUN_END_MOVE_M = 15.0;
 // Raised by the pin interrupt so no press can be lost to a slow loop pass. The
 // ISR does nothing else: debouncing happens in loop(), which keeps millis() out
 // of interrupt context entirely.
-volatile bool triggerLatched = false;
+// The INTERRUPT timestamps the press; the loop only reads the clock it kept.
+//
+// Two earlier attempts failed here and both are worth remembering.
+//
+// Polling the pin (26 Oct) lost presses in the field: serving the dashboard
+// stretches a loop pass to 300-800 ms, and a quick press begins and ends
+// inside one, so there was nothing left to measure.
+//
+// Pairing edges in the ISR (7 Nov, morning) failed worse - nothing logged at
+// all. It assumed a falling edge opens a closure and a rising edge closes it.
+// With this pad there are about ten edges per press, so a bounce closed the
+// measurement a millisecond after it opened; the pin then sat LOW for the real
+// 300 ms of the press without generating another edge, and that press was
+// never timed. Every closure came out at 1-6 ms.
+//
+// So: no pairing. The ISR records only WHEN the first LOW of a closure
+// happened and WHEN the most recent edge of any kind happened. The loop
+// decides a press is over once the pin is sitting HIGH and has been quiet for
+// the settle time, and the duration is the difference between those two
+// timestamps. Chatter cannot desynchronise it because nothing is paired, and a
+// late loop only logs the point late - it cannot change what was measured.
+volatile bool          triggerLatched = false;   // kept: "an edge happened"
+volatile unsigned long isrFirstLow    = 0;       // first LOW of the closure in progress
+volatile unsigned long isrLastEdge    = 0;       // most recent edge, of either direction
+portMUX_TYPE           triggerMux     = portMUX_INITIALIZER_UNLOCKED;
 
 void IRAM_ATTR triggerISR() {
+  unsigned long now = millis();
+  portENTER_CRITICAL_ISR(&triggerMux);
   triggerLatched = true;
+  isrLastEdge    = now;
+  if (digitalRead(TRIGGER_PIN) == LOW && isrFirstLow == 0) isrFirstLow = now;
+  portEXIT_CRITICAL_ISR(&triggerMux);
 }
 
 // Pulls that did nothing because the safety was on. Previously silent - no
@@ -360,9 +461,61 @@ float         apWindowSec    = 120.0; // how long each window stays open
 const unsigned long AP_SUMMON_HOLD_MS = 5000;
 
 // --- Point de-dup state ---
+//
+// These used to live only in RAM, so every reset handed out one free record:
+// hasLoggedPoint came back false and the first trigger edge logged with no
+// cooldown and no distance check. On a unit with an intermittent power
+// connection that is one spurious point per boot, which is how 14 October 2026
+// produced 87 records in bursts 3-4 seconds apart while standing still.
+// Now they survive a reboot via /lastpoint.txt.
 double lastPointLat   = 0.0;
 double lastPointLon   = 0.0;
 bool   hasLoggedPoint = false;
+unsigned long lastPointEpoch = 0;     // GNSS time of the last logged point
+
+// --- Trigger safety at boot ---
+//
+// The ISR is attached FALLING. Pin state during reset and the moment pinMode
+// engages the pull-up can both present as an edge, and a pad resting closed at
+// power-on looks like a press that never ended. Nothing is accepted until the
+// trigger has been SEEN released at least once.
+// Set once the trigger has been seen RELEASED and settled, cleared the moment
+// a press is accepted. One accepted press per physical press-release cycle,
+// regardless of how long the press is held.
+//
+// A plain time lockout cannot do this. A bench run of 50 deliberate presses on
+// the Olight pad produced 539 falling edges and 53 accepted at a 250 ms
+// lockout: conductive rubber chatters as the thumb rolls off, and that chatter
+// lands AFTER the lockout has expired if the press was held longer than the
+// lockout. Raising the timeout just moves the hold duration at which it fails.
+bool triggerSeenReleased = false;
+unsigned long triggerHighSince = 0;
+
+// --- HOLD TO LOG ---------------------------------------------------------
+//
+// The Olight pad sits proud enough that a finger resting on the spray trigger
+// brushes it, and on 26 Oct that was logging points nobody meant. The pad is a
+// plain on/off contact, so there is no pressure to read: a brush and a squeeze
+// are electrically identical. What differs is HOW LONG the contact stays shut,
+// so that is what gets measured.
+//
+// The pad bounces open mid-press - the 20-press log on 25 Oct showed the pin
+// genuinely re-opening inside a single squeeze - so the measurement cannot be
+// "shut continuously for N ms". The ISR instead treats a closure as running
+// until the pin settles high, and reports the LONGEST closure it saw since the
+// loop last looked, which steps over both mid-press dropouts and the burst of
+// short closures that follows a release.
+//
+// This was polled until 7 Nov. See the note on the ISR for why it is not.
+unsigned long triggerTooBrief   = 0;      // closures rejected as a brush
+
+// How long the pin must sit HIGH before a release counts as settled. Long
+// enough to outlast contact chatter, far shorter than anyone can press twice.
+const unsigned long triggerReleaseSettleMs = 60;
+
+// Set when the config could not be read and defaults are in use, so the
+// dashboard can say so instead of quietly looking normal.
+String configWarning = "";
 
 // --- Trigger state ---
 int           lastTriggerRaw      = HIGH;
@@ -420,7 +573,60 @@ String        lastRejectReason = "";
 // gate. If these never move, the problem is the pad or the wiring and no amount
 // of firmware reading will find it. If they move but nothing logs, it is us.
 unsigned long triggerRawChanges = 0;
+// Raw interrupt fires, bounce included. A diagnostic, not an operator figure:
+// a mechanical pad bounces on release, so this reads roughly 30% above the
+// number of real presses. Kept as the cross-check against triggerRawChanges.
 unsigned long triggerPresses    = 0;
+// Presses the debounce gate ACCEPTED, and the ones it threw away. These exist
+// because the edge message could not answer "did that press count?". It printed
+// a pass-local flag, and only on passes where the POLLED level had changed - so
+// with a chattering pad the accepted edge was usually consumed on some other
+// pass and the line read fired=no for a press that had in fact been taken.
+unsigned long triggerAccepted   = 0;
+unsigned long triggerRefused    = 0;
+
+// How long the pad must be held shut before a press counts. Lives in
+// config.txt so it can be tuned in the paddock by feel instead of by reflash.
+unsigned long triggerHoldMs     = 150;
+
+// Points actually written this session. This is what an operator wants - "how
+// many have I got" - and until now nothing on the dashboard answered it for a
+// POINT-mode day, because the session summary only appeared when there were
+// polygons or continuous runs to report.
+unsigned long pointsLogged      = 0;
+
+// Where the unit has actually captured something this session.
+//
+// The map could originally only show two things: a line WHILE it was being
+// recorded, and points that had already reached ArcGIS. So a finished line, or
+// a morning's points before a sync, showed nothing at all - which is the first
+// thing anyone checks the map for.
+//
+// 200 positions at 16 bytes is 3.2 KB. Deliberately modest: the last time
+// something took static RAM without asking, TLS stopped being able to open a
+// connection and the sync died.
+const int TRAIL_MAX = 200;
+double        trailLat[TRAIL_MAX];
+double        trailLon[TRAIL_MAX];
+int           trailCount = 0;    // how many are valid
+int           trailNext  = 0;    // ring cursor
+// 0 means a standalone point; anything higher is a shape, and vertices sharing
+// a number belong to the same line or ring. Without this every line vertex was
+// drawn as its own dot, so a captured line looked like a scatter of marks and
+// was indistinguishable from the points beside it.
+int           trailSeg[TRAIL_MAX];
+int           trailSlot[TRAIL_MAX];   // which target was selected at the time
+int           trailSegNow  = 0;  // shape being captured right now
+int           trailSegLast = 0;  // highest shape number handed out
+void trailAdd(double lat, double lon, int seg) {
+  if (lat == 0.0 && lon == 0.0) return;
+  trailLat[trailNext]  = lat;
+  trailLon[trailNext]  = lon;
+  trailSeg[trailNext]  = seg;
+  trailSlot[trailNext] = currentSlot;
+  trailNext = (trailNext + 1) % TRAIL_MAX;
+  if (trailCount < TRAIL_MAX) trailCount++;
+}
 unsigned long lastAcceptedPress = 0;
 
 // How long one pass of loop() takes. The old trigger scheme assumed the loop
@@ -561,7 +767,7 @@ NmeaRelay nmeaRelay;
 
 // The ESP32 power enum is simply dBm x 4, so this maps cleanly.
 // The access point name this unit uses when config.txt does not set one.
-// Derived from the device id so two units are never both "MSA-EcoSync-Setup" -
+// Derived from the device id so two units are never both "FPE-EcoSync-Setup" -
 // same name, same password, and a phone silently joins the stronger of the
 // two. You then configure the wrong unit with no error and no clue.
 String defaultApSsid() {
@@ -571,7 +777,7 @@ String defaultApSsid() {
 }
 
 // mDNS hostname, also derived - both units answering to ecosyncfield.local on
-// the depot network is a fight neither of them wins. "MSA_EcoSync_001" gives
+// the depot network is a fight neither of them wins. "FPE_EcoSync_001" gives
 // ecosync001.local. Anything without a trailing number keeps the old name.
 String mdnsHostname() {
   int end = currentJobID.length();
@@ -586,6 +792,28 @@ wifi_power_t txPowerSetting() {
   if (d < 2.0)  d = 2.0;
   if (d > 19.5) d = 19.5;
   return (wifi_power_t)(int)(d * 4.0);
+}
+
+// A target name going into a JavaScript string that itself sits inside a
+// single-quoted HTML attribute. Three layers, so three things to get right:
+// a backslash or a double quote would break the JS string, and an apostrophe -
+// "Cat's Claw" is a real weed - would end the attribute early and silently
+// mangle the button.
+String jsEscape(const String &in) {
+  String out;
+  out.reserve(in.length() + 16);
+  for (unsigned int i = 0; i < in.length(); i++) {
+    char c = in.charAt(i);
+    switch (c) {
+      case '\\': out += "\\\\";  break;
+      case '"':  out += "\\\"";  break;
+      case '\'': out += "&#39;";  break;   // entity: the attribute is single-quoted
+      case '<':  out += "&lt;";    break;
+      case '&':  out += "&amp;";   break;
+      default:   out += c;
+    }
+  }
+  return out;
 }
 
 String htmlEscape(const String &in) {
@@ -651,7 +879,8 @@ static void applyConfigLine(const String &line) {
     int i = k.charAt(4) - '1';
     String m = v; m.toUpperCase();
     if (i >= 0 && i < NUM_SLOTS &&
-        (m == "POINT" || m == "CONTINUOUS" || m == "POLYGON")) slotMode[i] = m;
+        (m == "POINT" || m == "CONTINUOUS" || m == "POLYGON" ||
+         m == "LINE")) slotMode[i] = m;
   }
   else if (k.startsWith("tunea") && k.length() == 6) {
     int i = k.charAt(5) - '1';
@@ -665,6 +894,8 @@ static void applyConfigLine(const String &line) {
   else if (k == "job")          currentJobNumber = v;
   else if (k == "wifi_ssid")    wifiSsid         = v;
   else if (k == "wifi_pass")    wifiPass         = v;
+  else if (k == "wifi_ssid2")   wifiSsid2        = v;
+  else if (k == "wifi_pass2")   wifiPass2        = v;
   else if (k == "ap_always")    apAlways         = (v == "1" || v == "true" || v == "yes");
   else if (k == "ap_idle_stop") apIdleStopMin    = v.toFloat();
   else if (k == "ap_window_min") apWindowMin     = v.toFloat();
@@ -680,6 +911,11 @@ static void applyConfigLine(const String &line) {
   else if (k == "poly_timeout")  polyTimeoutS    = v.toFloat();
   else if (k == "point_cooldown") pointCooldownS = v.toFloat();
   else if (k == "point_min_dist") pointMinDistM  = v.toFloat();
+  else if (k == "trigger_hold_ms") triggerHoldMs = (unsigned long)v.toInt();
+  else if (k == "esri_point_url") { if (v.length()) esriPointServiceURL   = v; }
+  else if (k == "esri_poly_url")  { if (v.length()) esriPolygonServiceURL = v; }
+  else if (k == "esri_track_url") { if (v.length()) esriTrackServiceURL   = v; }
+  else if (k == "esri_line_url")  { if (v.length()) esriLineServiceURL    = v; }
   else if (k == "wifi_tx_dbm")   wifiTxDbm       = v.toFloat();
   else if (k == "cpu_mhz")       cpuMhz           = v.toInt();
   else if (k == "ui_refresh")    uiRefreshS       = v.toInt();
@@ -693,7 +929,8 @@ static void sanitiseConfig() {
   for (int i = 0; i < NUM_SLOTS; i++) {
     if (slotWeed[i].length() == 0)    slotWeed[i]    = defaultWeed[i];
     if (slotControl[i].length() == 0) slotControl[i] = "Foliar Spray";
-    if (slotMode[i] != "POINT" && slotMode[i] != "CONTINUOUS" && slotMode[i] != "POLYGON") {
+    if (slotMode[i] != "POINT" && slotMode[i] != "CONTINUOUS" &&
+        slotMode[i] != "POLYGON" && slotMode[i] != "LINE") {
       slotMode[i] = "POINT";
     }
     // A slot with no explicit tuning inherits the old global values, so a card
@@ -701,11 +938,15 @@ static void sanitiseConfig() {
     if (slotA[i] < 0.0) {
       if      (slotMode[i] == "POINT")      slotA[i] = pointCooldownS;
       else if (slotMode[i] == "CONTINUOUS") slotA[i] = 1.0;
+      else if (slotMode[i] == "LINE")       slotA[i] = 5.0;   // vertex spacing
       else                                  slotA[i] = polyMinVertexM;
     }
     if (slotB[i] < 0.0) {
       if      (slotMode[i] == "POINT")      slotB[i] = pointMinDistM;
       else if (slotMode[i] == "CONTINUOUS") slotB[i] = 8.0;
+      // 0 = no idle timeout. A bait run stops to refill, and a timeout would
+      // chop one trail into several. The second press is what ends a line.
+      else if (slotMode[i] == "LINE")       slotB[i] = 0.0;
       else                                  slotB[i] = polyTimeoutS;
     }
     // Bounds. A continuous interval under half a second would flood the card.
@@ -732,15 +973,15 @@ static void sanitiseConfig() {
   currentJobID.replace(" ", "_");
   if (currentJobID.length() == 0) currentJobID = DEFAULT_DEVICE_ID;
 
-  if (currentJobNumber.length() == 0) currentJobNumber = "MSA_Job_001";
+  if (currentJobNumber.length() == 0) currentJobNumber = "FPE_Job_001";
   if (apSsid.length() == 0)           apSsid = defaultApSsid();
-  if (apPass.length() < 8)            apPass = "msaecosync";   // WPA2 minimum
+  if (apPass.length() < 8)            apPass = "fpeecosync";   // WPA2 minimum
   if (apIdleStopMin < 0.0 || apIdleStopMin > 120.0) apIdleStopMin = 10.0;
   if (apWindowMin   < 0.0 || apWindowMin   > 240.0) apWindowMin   = 15.0;
   // Below 30 s there is no time to find the SSID and open the page; above ten
   // minutes it is not a window, it is just an AP with gaps in it.
   if (apWindowSec  < 30.0 || apWindowSec   > 600.0) apWindowSec   = 120.0;
-  if (adminUser.length() == 0)        adminUser = "msa";
+  if (adminUser.length() == 0)        adminUser = "fpe";
   // 15 m is a SANITY limit, not a quality bar. Quality is now recorded per
   // record in gps_accuracy_m and filtered in ArcGIS, where the decision is
   // reversible. A tight gate here throws data away in the scrub, permanently,
@@ -753,6 +994,12 @@ static void sanitiseConfig() {
   if (polyTimeoutS < 3.0 || polyTimeoutS > 300.0)     polyTimeoutS = 15.0;
   if (pointCooldownS < 0.0 || pointCooldownS > 600.0) pointCooldownS = 10.0;
   if (pointMinDistM < 0.0 || pointMinDistM > 1000.0)  pointMinDistM = 5.0;
+  // 0 would log on the faintest touch, which is the fault this exists to fix.
+  // Above 2 s a normal squeeze would be thrown away as a brush.
+  // 0 is legal and means "do not measure at all" - accept on the edge, the way
+  // the build that ran a 1,174-point day did. It is the fallback if duration
+  // measurement ever misbehaves in the field again.
+  if (triggerHoldMs != 0 && (triggerHoldMs < 20 || triggerHoldMs > 2000)) triggerHoldMs = 150;
   if (wifiTxDbm < 2.0 || wifiTxDbm > 19.5)            wifiTxDbm = 8.5;
   if (nmeaPort < 1024 || nmeaPort > 65535)            nmeaPort = 10110;
   // Only these three are valid ESP32 crystal-derived speeds, and Wi-Fi will not
@@ -762,15 +1009,94 @@ static void sanitiseConfig() {
   if (uiRefreshS < 2 || uiRefreshS > 60)               uiRefreshS = 10;
 }
 
+// Which network the next join attempt should use, and its label for the log
+// and the dashboard. Slots with no SSID are skipped, so a unit with only one
+// configured behaves exactly as it did before.
+bool wifiSlotConfigured(int slot) {
+  return slot == 0 ? wifiSsid.length() > 0 : wifiSsid2.length() > 0;
+}
+
+String wifiSlotSsid(int slot)  { return slot == 0 ? wifiSsid : wifiSsid2; }
+String wifiSlotPass(int slot)  { return slot == 0 ? wifiPass : wifiPass2; }
+String wifiSlotLabel(int slot) { return slot == 0 ? "Starlink" : "phone hotspot"; }
+
+// Move to the other slot if it is configured. Called after a failed attempt so
+// the unit alternates instead of hammering one network that is not there.
+void wifiNextSlot() {
+  int other = wifiSlot == 0 ? 1 : 0;
+  if (wifiSlotConfigured(other)) wifiSlot = other;
+}
+
+String wifiAnySsid() {
+  if (wifiSlotConfigured(wifiSlot)) return wifiSlotSsid(wifiSlot);
+  if (wifiSlotConfigured(0))        return wifiSsid;
+  if (wifiSlotConfigured(1))        return wifiSsid2;
+  return "";
+}
+
+
+// --- Last logged point, across reboots --------------------------------------
+//
+// One line: epoch,lat,lon. Written after every accepted point, read once at
+// boot. Small enough that the extra write per record costs nothing, and it is
+// the difference between a reset being invisible and a reset inventing a
+// record.
+void saveLastPoint() {
+  if (!sdReady) return;
+  File f = SD.open(LASTPOINT_PATH, FILE_WRITE);   // FILE_WRITE truncates here
+  if (!f) return;
+  f.println(String(lastPointEpoch) + "," + String(lastPointLat, 6) + "," +
+            String(lastPointLon, 6));
+  f.close();
+}
+
+void loadLastPoint() {
+  if (!sdReady || !SD.exists(LASTPOINT_PATH)) return;
+  File f = SD.open(LASTPOINT_PATH, FILE_READ);
+  if (!f) return;
+  String line = f.readStringUntil('\n');
+  f.close();
+  line.trim();
+
+  int c1 = line.indexOf(',');
+  int c2 = line.indexOf(',', c1 + 1);
+  if (c1 < 0 || c2 < 0) return;
+
+  unsigned long ep = (unsigned long)line.substring(0, c1).toInt();
+  double la = line.substring(c1 + 1, c2).toDouble();
+  double lo = line.substring(c2 + 1).toDouble();
+  if (ep == 0 || (la == 0.0 && lo == 0.0)) return;
+
+  lastPointEpoch = ep;
+  lastPointLat   = la;
+  lastPointLon   = lo;
+  hasLoggedPoint = true;
+  Serial.println("Last point restored from card (epoch " + String(ep) + ").");
+}
+
+
+// Write, verify, THEN swap.
+//
+// This used to SD.remove(CONFIG_PATH) and reopen it for writing. Lose power in
+// that window - which a unit with no off switch does every time the battery is
+// pulled - and there is no config.txt at all. The next boot then wrote defaults
+// over the card, so a brownout did not just interrupt a save, it destroyed the
+// Wi-Fi password, the AP password, the device id and every tuning value. That
+// is what happened on 14 October 2026.
+//
+// Now the new file is built as config.tmp and only promoted once it is written
+// and its size checked, with the previous copy kept as config.bak. The worst a
+// power cut can now do is leave a stale config.txt and an orphan config.tmp,
+// and loadConfigFromSD() reports both.
 bool saveConfigToSD() {
   if (!sdReady) return false;
-  SD.remove(CONFIG_PATH);
-  File f = SD.open(CONFIG_PATH, FILE_WRITE);
+  SD.remove(CONFIG_TMP);
+  File f = SD.open(CONFIG_TMP, FILE_WRITE);
   if (!f) {
-    Serial.println("Config save FAILED (could not open file).");
+    Serial.println("Config save FAILED (could not open config.tmp).");
     return false;
   }
-  f.println("# MSA EcoSync Field configuration");
+  f.println("# FPE EcoSync Field configuration");
   f.println("# One key=value per line. Lines starting with # are ignored.");
   f.println("");
   f.println("# WHICH UNIT THIS IS. Goes into job_id on every record, and it is");
@@ -784,12 +1110,13 @@ bool saveConfigToSD() {
   f.println("# control_type field in ArcGIS - if that field uses a coded-value");
   f.println("# domain, put the CODE here, not the description.");
   f.println("#");
-  f.println("# mode<N> is POINT, CONTINUOUS or POLYGON, and decides what the");
+  f.println("# mode<N> is POINT, CONTINUOUS, POLYGON or LINE, and decides what the");
   f.println("# two tuning numbers mean:");
   f.println("#   POINT       tunea = cooldown (s)       tuneb = movement that releases it (m)");
   f.println("#   CONTINUOUS  tunea = seconds per fix    tuneb = release hold (s)");
   f.println("#               a run also ends after 15 m of movement with the trigger up");
   f.println("#   POLYGON     tunea = vertex spacing (m) tuneb = idle timeout (s)");
+  f.println("#   LINE        tunea = vertex spacing (m) tuneb = idle timeout (s), 0 = off");
   for (int i = 0; i < NUM_SLOTS; i++) {
     String n = String(i + 1);
     f.println("target"  + n + "=" + slotWeed[i]);
@@ -801,9 +1128,19 @@ bool saveConfigToSD() {
   }
   f.println("job=" + currentJobNumber);
   f.println("");
-  f.println("# Wi-Fi. Leave wifi_ssid blank to force setup access-point mode.");
+  f.println("# Wi-Fi. Two networks, tried in turn, then the setup access point.");
+  f.println("# Leave both SSIDs blank to force setup access-point mode.");
+  f.println("#");
+  f.println("# 1 - Starlink, or whatever network is at the vehicle.");
   f.println("wifi_ssid=" + wifiSsid);
   f.println("wifi_pass=" + wifiPass);
+  f.println("#");
+  f.println("# 2 - the operator's phone hotspot. Prefer this in the field: the");
+  f.println("#     unit joins the phone, so the phone keeps its cellular data");
+  f.println("#     and Field Maps still works while you read the dashboard.");
+  f.println("#     iPhone: turn on Maximise Compatibility, the unit is 2.4 GHz only.");
+  f.println("wifi_ssid2=" + wifiSsid2);
+  f.println("wifi_pass2=" + wifiPass2);
   f.println("");
   f.println("# Serve this unit's GNSS position to phone apps (ArcGIS QuickCapture,");
   f.println("# Survey123) over TCP, so they log at the unit's accuracy rather than");
@@ -862,7 +1199,49 @@ bool saveConfigToSD() {
   f.println("# Set point_min_dist=0 for a plain timer.");
   f.println("point_cooldown=" + String(pointCooldownS, 1));
   f.println("point_min_dist=" + String(pointMinDistM, 1));
+  f.println("");
+  f.println("# How long the pad must be held shut before a press is logged, in");
+  f.println("# milliseconds. Raise it if a finger resting on the pad logs points;");
+  f.println("# lower it if deliberate presses are being missed. 20-2000, or 0 to");
+  f.println("# turn the duration check off and log on the edge.");
+  f.println("trigger_hold_ms=" + String(triggerHoldMs));
+  f.println("");
+  f.println("# Where records are posted. All four have a built-in default, so");
+  f.println("# leaving a key out - or blank - keeps the compiled value. Set one");
+  f.println("# only to send a unit's records somewhere other than the usual layer.");
+  f.println("esri_point_url=" + esriPointServiceURL);
+  f.println("esri_poly_url="  + esriPolygonServiceURL);
+  f.println("esri_track_url=" + esriTrackServiceURL);
+  f.println("esri_line_url="  + esriLineServiceURL);
+  f.flush();
   f.close();
+
+  // Did it actually land? A card that fills up or drops out mid-write still
+  // closes cleanly, so trust the file's size rather than the return codes.
+  File chk = SD.open(CONFIG_TMP, FILE_READ);
+  if (!chk) {
+    Serial.println("Config save FAILED (config.tmp vanished after writing).");
+    return false;
+  }
+  size_t wrote = chk.size();
+  chk.close();
+  if (wrote < CONFIG_MIN_BYTES) {
+    Serial.println("Config save FAILED (config.tmp only " + String(wrote) +
+                   " bytes - keeping the old config).");
+    SD.remove(CONFIG_TMP);
+    return false;
+  }
+
+  // Keep the outgoing copy. If anything goes wrong from here there is still a
+  // complete configuration on the card.
+  SD.remove(CONFIG_BAK);
+  if (SD.exists(CONFIG_PATH)) SD.rename(CONFIG_PATH, CONFIG_BAK);
+
+  if (!SD.rename(CONFIG_TMP, CONFIG_PATH)) {
+    Serial.println("Config save FAILED at the rename - restoring the backup.");
+    if (SD.exists(CONFIG_BAK)) SD.rename(CONFIG_BAK, CONFIG_PATH);
+    return false;
+  }
   return true;
 }
 
@@ -873,11 +1252,41 @@ void loadConfigFromSD() {
     return;
   }
 
+  // An interrupted save leaves this behind. Worth saying out loud - it is the
+  // fingerprint of a power cut during a write, which on this hardware means a
+  // flat battery or a loose connection rather than anything in software.
+  if (SD.exists(CONFIG_TMP)) {
+    Serial.println("WARNING: config.tmp found - a previous save was interrupted.");
+    configWarning = "A previous settings save was interrupted (config.tmp left "
+                    "on the card). Check the battery and connections.";
+    SD.remove(CONFIG_TMP);
+  }
+
   if (!SD.exists(CONFIG_PATH)) {
-    Serial.println("No config.txt - writing defaults.");
-    sanitiseConfig();
-    saveConfigToSD();
-    return;
+    // Do NOT write defaults here. The old code did, which turned "could not
+    // read the config" into "destroyed the config" - the file was gone, so
+    // saving defaults made the loss permanent.
+    if (SD.exists(CONFIG_BAK)) {
+      Serial.println("config.txt missing - restoring from config.bak.");
+      if (SD.rename(CONFIG_BAK, CONFIG_PATH)) {
+        configWarning = "config.txt was missing and has been restored from the "
+                        "backup. Check your settings are right.";
+      } else {
+        Serial.println("Restore FAILED - running on built-in defaults.");
+        configWarning = "config.txt is missing and the backup could not be "
+                        "restored. Running on built-in defaults - NOTHING is "
+                        "configured for this unit.";
+        sanitiseConfig();
+        return;
+      }
+    } else {
+      Serial.println("No config.txt and no backup - running on built-in "
+                     "defaults. Nothing has been written to the card.");
+      configWarning = "No config.txt on the card. Running on built-in defaults "
+                      "- set this unit up before working.";
+      sanitiseConfig();
+      return;
+    }
   }
 
   File f = SD.open(CONFIG_PATH, FILE_READ);
@@ -969,12 +1378,15 @@ void recoverUnsyncedCounts() {
   unsyncedPoints   = countRecords(PENDING_PTS);
   unsyncedPolygons = countRecords(PENDING_POLY);
   unsyncedTrack    = countRecords(PENDING_TRACK);
-  if (unsyncedPoints || unsyncedPolygons || unsyncedTrack) {
+  unsyncedLines    = countRecords(PENDING_LINE);
+  if (unsyncedPoints || unsyncedPolygons || unsyncedTrack || unsyncedLines) {
     Serial.println("Recovered backlog: " + String(unsyncedPoints) + " points, " +
                    String(unsyncedTrack) + " track, " +
-                   String(unsyncedPolygons) + " polygons pending sync.");
+                   String(unsyncedPolygons) + " polygons, " +
+                   String(unsyncedLines) + " lines pending sync.");
     lastSyncStatus = String(unsyncedPoints) + " pts / " + String(unsyncedTrack) +
-                     " trk / " + String(unsyncedPolygons) + " polys awaiting sync";
+                     " trk / " + String(unsyncedPolygons) + " polys / " +
+                     String(unsyncedLines) + " lines awaiting sync";
   }
 }
 
@@ -1020,6 +1432,23 @@ bool savePolygonLocally(String weed, String coords, unsigned long epochTime,
                    "|" + controlType + "|" + String(accuracyM, 2));
   dataFile.close();
   unsyncedPolygons++;
+  return true;
+}
+
+// Same record format as a polygon - the only difference is which queue it
+// joins and, later, whether the geometry is closed.
+bool saveLineLocally(String weed, String coords, unsigned long epochTime,
+                     String controlType, double accuracyM) {
+  if (!sdReady) return false;
+  File dataFile = SD.open(PENDING_LINE, FILE_APPEND);
+  if (!dataFile) return false;
+  weed.replace("|", " ");
+  controlType.replace("|", " ");
+  String job = currentJobNumber; job.replace("|", " ");
+  dataFile.println(weed + "|" + coords + "|" + String(epochTime) + "|" + job +
+                   "|" + controlType + "|" + String(accuracyM, 2));
+  dataFile.close();
+  unsyncedLines++;
   return true;
 }
 
@@ -1097,7 +1526,7 @@ void pollBattery() {
 String polyRecoveryNote = "";   // set at boot when an unfinished ring was found
 
 void journalStart(const String &weed, const String &control,
-                  const String &job, unsigned long epoch) {
+                  const String &job, unsigned long epoch, bool isLine) {
   if (!sdReady) return;
   SD.remove(POLY_JOURNAL);                    // never append to a stale ring
   File f = SD.open(POLY_JOURNAL, FILE_WRITE);
@@ -1105,7 +1534,10 @@ void journalStart(const String &weed, const String &control,
   String w = weed;    w.replace("|", " ");
   String c = control; c.replace("|", " ");
   String j = job;     j.replace("|", " ");
-  f.println("H|" + w + "|" + c + "|" + j + "|" + String(epoch));
+  // The trailing shape tag was added on 28 Oct. A header without it is a
+  // polygon, which is what every journal written before then was.
+  f.println("H|" + w + "|" + c + "|" + j + "|" + String(epoch) +
+            "|" + String(isLine ? "LINE" : "POLY"));
   f.close();
 }
 
@@ -1138,6 +1570,7 @@ void recoverPolygonJournal() {
   double        worstAcc = 0.0;
   int           verts    = 0;
   bool          haveHeader = false;
+  bool          wasLine    = false;
   double        firstLat = 0.0, firstLon = 0.0;   // for the short-ring fallback
 
   while (f.available()) {
@@ -1153,7 +1586,14 @@ void recoverPolygonJournal() {
       weed       = line.substring(2, p1);
       control    = line.substring(p1 + 1, p2);
       job        = line.substring(p2 + 1, p3);
-      epoch      = strtoul(line.substring(p3 + 1).c_str(), NULL, 10);
+      int p4     = line.indexOf('|', p3 + 1);
+      if (p4 < 0) {
+        epoch   = strtoul(line.substring(p3 + 1).c_str(), NULL, 10);
+        wasLine = false;                      // pre-28-Oct journal: a ring
+      } else {
+        epoch   = strtoul(line.substring(p3 + 1, p4).c_str(), NULL, 10);
+        wasLine = (line.substring(p4 + 1) == "LINE");
+      }
       haveHeader = true;
     } else if (line.startsWith("V|")) {
       // A vertex line can be truncated mid-write by the power loss that caused
@@ -1174,6 +1614,30 @@ void recoverPolygonJournal() {
     }
   }
   f.close();
+
+  if (haveHeader && wasLine) {
+    String savedJob  = currentJobNumber;
+    currentJobNumber = job;
+    if (verts >= 2) {
+      bool ok = saveLineLocally(weed, coords, epoch, control, worstAcc);
+      polyRecoveryNote = ok
+        ? ("RECOVERED an unfinished line: " + String(verts) + " vertices (saved, will sync)")
+        : ("Found an unfinished line of " + String(verts) +
+           " vertices but the SAVE FAILED - check the card");
+    } else if (verts == 1) {
+      bool ok = saveRecordLocally(weed, firstLat, firstLon, epoch, control, worstAcc,
+                                  epoch, "LINE_SHORT");
+      polyRecoveryNote = ok
+        ? "RECOVERED an unfinished line of 1 vertex - saved as a POINT"
+        : "Found an unfinished line of 1 vertex but the SAVE FAILED - check the card";
+    } else {
+      polyRecoveryNote = "Unfinished line had no usable vertices - discarded";
+    }
+    currentJobNumber = savedJob;
+    Serial.println(polyRecoveryNote);
+    SD.remove(POLY_JOURNAL);
+    return;
+  }
 
   if (haveHeader && verts >= 3) {
     // savePolygonLocally reads the job number from the live global, so pin it to
@@ -1223,7 +1687,11 @@ void applySlotTuning() {
   if (loggingMode == "POINT") {
     pointCooldownS = slotA[currentSlot];
     pointMinDistM  = slotB[currentSlot];
-  } else if (loggingMode == "POLYGON") {
+  } else if (loggingMode == "POLYGON" || loggingMode == "LINE") {
+    // LINE shares the polygon tuning: A is vertex spacing, B is the idle
+    // timeout. Without this branch a LINE slot's tuning was never applied at
+    // all, so a line ran on whatever the last polygon slot happened to leave
+    // behind - including a 15 s timeout that would close it mid-trail.
     polyMinVertexM = slotA[currentSlot];
     polyTimeoutS   = slotB[currentSlot];
   }
@@ -1246,6 +1714,8 @@ void endContinuousRun(const char *reason) {
 
 void startPolygonAt(double lat, double lon, unsigned long epoch) {
   polygonActive        = true;
+  shapeIsLine          = (loggingMode == "LINE");
+  trailSegNow          = ++trailSegLast;
   currentPolygonCoords = "";
   currentPolygonCoords.reserve(POLY_COORD_RESERVE);
   currentPolygonWeed    = currentWeed;          // pin the target at start time
@@ -1256,6 +1726,7 @@ void startPolygonAt(double lat, double lon, unsigned long epoch) {
   polyWorstAccM        = live_accuracy_m;
 
   currentPolygonCoords += String(lon, 6) + "," + String(lat, 6) + ";";
+  trailAdd(lat, lon, trailSegNow);
   vertexCount   = 1;
   lastVertexLat = lat;
   lastVertexLon = lon;
@@ -1263,7 +1734,8 @@ void startPolygonAt(double lat, double lon, unsigned long epoch) {
   polyStartLon  = lon;
 
   // The ring is now crash-safe from its very first vertex.
-  journalStart(currentPolygonWeed, currentPolygonControl, currentJobNumber, epoch);
+  journalStart(currentPolygonWeed, currentPolygonControl, currentJobNumber,
+               epoch, shapeIsLine);
   journalVertex(lat, lon, polyWorstAccM);
 }
 
@@ -1271,6 +1743,41 @@ void startPolygonAt(double lat, double lon, unsigned long epoch) {
 void closePolygon(const char *reason, bool allowSave) {
   if (!polygonActive) return;
   polygonActive = false;
+
+  // A line needs two vertices, not three, and is never closed into a ring.
+  // Below two there is no line at all, so it degrades to a point the same way
+  // a short ring does - a capture must never leave no trace.
+  if (shapeIsLine) {
+    if (allowSave && vertexCount >= 2) {
+      if (saveLineLocally(currentPolygonWeed, currentPolygonCoords, polyStartTime,
+                          currentPolygonControl, polyWorstAccM)) {
+        lastAction = "Saved line, " + String(vertexCount) + " pts (" + reason + ")";
+      } else {
+        lastAction = "LINE SAVE FAILED - check SD card";
+      }
+    }
+    else if (allowSave && vertexCount >= 1) {
+      if (saveRecordLocally(currentPolygonWeed, polyStartLat, polyStartLon, polyStartTime,
+                            currentPolygonControl, polyWorstAccM,
+                            polyStartTime, "LINE_SHORT")) {
+        lastAction = "Too short for a line (" + String(vertexCount) +
+                     " pts) - saved as a POINT (" + String(reason) + ")";
+      } else {
+        lastAction = "SHORT LINE SAVE FAILED - check SD card";
+      }
+    }
+    else {
+      lastAction = "Line discarded, no vertices (" + String(reason) + ")";
+    }
+    Serial.println("--- LINE CLOSED: " + String(reason) +
+                   " (" + String(vertexCount) + " vertices) ---");
+    journalClear();
+    currentPolygonCoords = "";
+    vertexCount = 0;
+    shapeIsLine = false;
+    trailSegNow = 0;
+    return;
+  }
 
   if (allowSave && vertexCount >= 3) {
     if (savePolygonLocally(currentPolygonWeed, currentPolygonCoords, polyStartTime,
@@ -1315,6 +1822,7 @@ void closePolygon(const char *reason, bool allowSave) {
 
   currentPolygonCoords = "";
   vertexCount = 0;
+  trailSegNow = 0;
 }
 
 // Distance-gated vertex capture. Standing still adds nothing, so heap use is
@@ -1343,6 +1851,7 @@ void samplePolygonVertex() {
   }
 
   currentPolygonCoords += String(lon, 6) + "," + String(lat, 6) + ";";
+  trailAdd(lat, lon, trailSegNow);
   vertexCount++;
   lastVertexLat = lat;
   lastVertexLon = lon;
@@ -1405,8 +1914,8 @@ void stopAccessPoint(const char *why) {
 // Returns true if joined as a station. Falls back to access-point mode so the
 // config page is always reachable, even with no credentials on the card.
 bool connectWiFi(unsigned long timeoutMs) {
-  if (wifiSsid.length() == 0) {
-    Serial.println("No Wi-Fi SSID configured.");
+  if (!wifiSlotConfigured(0) && !wifiSlotConfigured(1)) {
+    Serial.println("No Wi-Fi SSID configured in either slot.");
     wifiLastError = "no SSID configured";
     startAccessPoint();
     return false;
@@ -1429,7 +1938,10 @@ bool connectWiFi(unsigned long timeoutMs) {
   // why ap_always costs ~45 mA.
   WiFi.setSleep(wifiSleep && !apMode);
   WiFi.setTxPower(txPowerSetting());
-  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  if (!wifiSlotConfigured(wifiSlot)) wifiNextSlot();
+  Serial.println("Wi-Fi: trying " + wifiSlotLabel(wifiSlot) + " (" +
+                 wifiSlotSsid(wifiSlot) + ")");
+  WiFi.begin(wifiSlotSsid(wifiSlot).c_str(), wifiSlotPass(wifiSlot).c_str());
 
   Serial.print("Joining " + wifiSsid + " ");
   unsigned long start = millis();
@@ -1511,7 +2023,7 @@ void maintainWiFi() {
     return;
   }
 
-  if (wifiSsid.length() == 0) return;
+  if (!wifiSlotConfigured(0) && !wifiSlotConfigured(1)) return;
 
   if (wifiDownSince == 0) {
     wifiDownSince = now;
@@ -1574,10 +2086,14 @@ void maintainWiFi() {
   wifiRetryPending = false;
 
   wifiJoinAttempts++;
+  // Alternate before retrying. Sitting on one SSID that is not present is how
+  // an officer with a hotspot up ends up locked out of the dashboard.
+  wifiNextSlot();
   Serial.println("Wi-Fi not connected (" + wifiLastError + ") - retrying " +
-                 wifiSsid + " [attempt " + String(wifiJoinAttempts) + "]");
+                 wifiSlotLabel(wifiSlot) + " " + wifiSlotSsid(wifiSlot) +
+                 " [attempt " + String(wifiJoinAttempts) + "]");
   WiFi.setTxPower(txPowerSetting());
-  WiFi.begin(wifiSsid.c_str(), wifiPass.c_str());
+  WiFi.begin(wifiSlotSsid(wifiSlot).c_str(), wifiSlotPass(wifiSlot).c_str());
 }
 
 // Accept one phone at a time. A newer connection replaces an older one, so a
@@ -1805,7 +2321,8 @@ void handleRoot() {
 
   String statusText = gpsLock ? "GPS LOCKED" : "SEARCHING...";
   if (!systemArmed) statusText = "SAFETY ON";
-  if (polygonActive) { bgColor = "#d35400"; statusText = "MAPPING POLYGON..."; }
+  if (polygonActive) { bgColor = "#d35400";
+                       statusText = shapeIsLine ? "RECORDING LINE..." : "MAPPING POLYGON..."; }
 
   String lockBtnText  = systemArmed ? "ENGAGE SAFETY" : "ARM SYSTEM";
   String lockBtnColor = systemArmed ? "#e74c3c" : "#2ecc71";
@@ -1851,10 +2368,21 @@ void handleRoot() {
   // A restart always lands here with the safety ON, because systemArmed starts
   // false. Say so loudly - otherwise it reads as the safety engaging by itself,
   // which is what sent us looking in the wrong place the first time.
-  if (bootWasUnexpected) {
+  if (bootWasUnexpected && !bootNoticeDismissed) {
     html += "<div style='background:#c0392b; color:white; padding:8px 10px; margin:0 12px 10px 12px; border-radius:8px; font-size:0.7em; font-weight:normal; border:1px solid white;'>";
     html += "<b>UNEXPECTED RESTART</b><br>" + htmlEscape(bootResetReason);
     html += "<br>The safety is always ON after a restart. Tap ARM before spraying.";
+    html += "<br><a href='/dismiss' style='color:white; font-size:0.9em; text-decoration:underline;'>Dismiss</a>";
+    html += "</div>";
+  }
+
+  // The config could not be read, or a previous save was cut short. Without
+  // this the unit looks completely normal while running on built-in defaults -
+  // wrong device id, wrong AP password, no Wi-Fi - and the first sign is a day
+  // of records logged under the wrong unit.
+  if (configWarning.length() > 0) {
+    html += "<div style='background:#c0392b; color:white; padding:8px 10px; margin:0 12px 10px 12px; border-radius:8px; font-size:0.7em; font-weight:normal; border:1px solid white;'>";
+    html += "<b>SETTINGS PROBLEM</b><br>" + htmlEscape(configWarning);
     html += "</div>";
   }
 
@@ -1865,11 +2393,17 @@ void handleRoot() {
   html += "</form>";
   html += "<hr style='width:80%; border-color:white; margin: 10px auto;'>";
 
-  html += "<h3 style='color:black; margin-bottom: 2px;'>Active Target: " + htmlEscape(currentWeed) + "</h3>";
+  html += "<h3 style='color:black; margin-bottom: 2px;'>Active Target: <span id='tgtname'>" +
+          htmlEscape(currentWeed) + "</span></h3>";
   html += "<h4 style='color:white; margin: 0 0 5px 0; font-size:0.8em;'>Control: " + htmlEscape(currentControlType) + "</h4>";
   html += "<h4 style='color:white; margin-top: 0; margin-bottom: 5px;'>Job Number: " + htmlEscape(currentJobNumber) + "</h4>";
   html += "<h4 style='color:black; margin-top: 0; margin-bottom: 10px;'>Mode: " + loggingMode;
-  if (polygonActive)  html += " (RECORDING " + String(vertexCount) + " pts)";
+  if (polygonActive) {
+    html += " (RECORDING " + String(vertexCount) + " pts)";
+    // A line has no idle timeout by default, so the only thing that ends it is
+    // the operator. Say so where they are looking, not in a manual.
+    if (shapeIsLine) html += "<br><span style='font-size:0.6em;'>Press the trigger again to end this line</span>";
+  }
   if (currentRunId)   html += " (RUN: " + String(continuousPoints) + " pts)";
   html += "</h4>";
 
@@ -1883,7 +2417,9 @@ void handleRoot() {
   html += "<div style='display:flex; flex-wrap:wrap; justify-content:center; margin:5px auto; width:94%;'>";
   for (int i = 0; i < NUM_SLOTS; i++) {
     bool active = (i == currentSlot);
-    html += "<a href='/setTarget?w=" + String(i + 1) + "' style='flex:0 0 44%; background-color:";
+    html += "<a id='t" + String(i + 1) + "' href='/setTarget?w=" + String(i + 1) +
+            "' onclick='return pick(event," + String(i + 1) + ",\"" +
+            jsEscape(slotWeed[i]) + "\")' style='flex:0 0 44%; background-color:";
     html += active ? "#1abc9c" : "#2980b9";
     html += "; color:white; padding:10px 4px; margin:3px; text-decoration:none; border-radius:8px; border:3px solid ";
     html += active ? "white" : "transparent";
@@ -1895,11 +2431,27 @@ void handleRoot() {
   }
   html += "</div>";
 
+  // Target switching without a page load. If fetch fails for any reason the
+  // handler falls back to the plain link, so a browser that will not run this
+  // still works exactly as before - just slowly.
+  html += "<script>function pick(e,n,nm){e.preventDefault();"
+          "fetch('/setTarget?w='+n+'&q=1').then(function(r){"
+          "if(r.status==409){alert('Line recording - press the trigger to end it first.');return;}"
+          "if(!r.ok)throw 0;"
+          "for(var i=1;i<=" + String(NUM_SLOTS) + ";i++){var b=document.getElementById('t'+i);"
+          "if(!b)continue;b.style.backgroundColor=(i==n)?'#1abc9c':'#2980b9';"
+          "b.style.borderColor=(i==n)?'white':'transparent';}"
+          "var h=document.getElementById('tgtname');if(h)h.textContent=nm;})"
+          ".catch(function(){location.href='/setTarget?w='+n;});return false;}</script>";
+
   html += "<hr style='width:80%; border-color:white; margin: 10px auto;'>";
   html += "<p style='font-size: 0.75em; margin:0;'>Unsynced:</p>";
   html += "<h2 style='font-size: 1.7em; margin: 0;'>" + String(unsyncedPoints) + " Pts";
   if (unsyncedTrack) html += " / " + String(unsyncedTrack) + " Trk";
-  html += " / " + String(unsyncedPolygons) + " Polys</h2><br>";
+  html += " / " + String(unsyncedPolygons) + " Polys";
+  if (unsyncedLines) html += " / " + String(unsyncedLines) + " Lines";
+  html += "</h2><br>";
+  html += "<a href='/map' style='background-color:#16a085; color:white; padding:12px 25px; text-decoration:none; border-radius:8px; display:inline-block; border:2px solid white; font-size: 0.9em; margin-bottom:8px;'>MAP VIEW</a><br>";
   html += "<a href='/forceSync' style='background-color:#8e44ad; color:white; padding:12px 25px; text-decoration:none; border-radius:8px; display:inline-block; border:2px solid white; font-size: 0.9em;'>SYNC TO ESRI</a><br><br>";
 
   // Refused pulls must be impossible to miss. The whole product is hands-free,
@@ -1928,10 +2480,16 @@ void handleRoot() {
   // Polygon outcomes this session. Spraying is hands-free, so the operator
   // cannot watch the screen while it happens - the only way to know whether
   // the settings are working is to be able to count afterwards.
-  if (polySaved || polyAsPoint || polyDiscarded || continuousRuns || continuousTotal) {
+  if (pointsLogged || polySaved || polyAsPoint || polyDiscarded ||
+      continuousRuns || continuousTotal || unsyncedPoints || unsyncedPolygons ||
+      unsyncedLines) {
     html += "<p style='font-size: 0.75em; color:black; margin:6px 0 0 0;'>Captured this session:</p>";
     html += "<p style='color:black; font-size:0.85em; margin:2px 0 8px 0;'>";
     bool first = true;
+    if (pointsLogged) {
+      html += "<b>" + String(pointsLogged) + " points</b>";
+      first = false;
+    }
     if (continuousRuns || continuousTotal) {
       html += String(continuousRuns) + " runs / " + String(continuousTotal) + " pts";
       first = false;
@@ -1949,6 +2507,14 @@ void handleRoot() {
     if (polyDiscarded) {
       if (!first) html += " &middot; ";
       html += "<b style='color:#7b241c;'>" + String(polyDiscarded) + " lost</b>";
+      first = false;
+    }
+    // Nothing is lost while it sits on the card, but an operator finishing a
+    // day should be able to see whether it has gone up yet.
+    int waiting = unsyncedPoints + unsyncedPolygons + unsyncedLines;
+    if (waiting > 0) {
+      if (!first) html += " &middot; ";
+      html += String(waiting) + " waiting to upload";
     }
     html += "</p>";
   }
@@ -1965,7 +2531,6 @@ void handleRoot() {
   }
   html += "<p style='font-size: 0.7em; color:black; font-weight:normal; margin:0 0 4px 0;'>";
   html += "Trigger: " + String(digitalRead(TRIGGER_PIN) == LOW ? "<b>PRESSED</b>" : "released");
-  html += " &nbsp;|&nbsp; presses since boot: " + String(triggerPresses);
   html += " &nbsp;|&nbsp; loop " + String(loopLastMs) + "ms (max " + String(loopMaxMs) + "ms)";
   html += " &nbsp;|&nbsp; " + String(systemArmed ? "ARMED" : "<b>SAFETY ON</b>");
   // Not a warning. Arming the safety to spray something you do not want
@@ -2064,6 +2629,24 @@ void handleSetTarget() {
     int w = server.arg("w").toInt();
     int s = w - 1;
     if (s >= 0 && s < NUM_SLOTS) {
+      // A LINE in progress refuses to be interrupted.
+      //
+      // On 14 Nov a mis-tap while driving an effort line ended it, and the
+      // only sign was that the next stretch of road went unrecorded until the
+      // trigger was pressed again. A line is a deliberate, minutes-long
+      // capture with a defined end, so an accidental tap must not be able to
+      // finish it - the trigger is the only thing that may. Polygons keep the
+      // old behaviour: there the target genuinely has changed, and the ring
+      // has to be closed against the target it was started with.
+      if (polygonActive && shapeIsLine) {
+        lastAction = "LINE RECORDING - press the trigger to end it before changing target";
+        Serial.println("Target change refused: a line is being recorded.");
+        if (server.hasArg("q")) { server.send(409); return; }
+        server.sendHeader("Location", "/");
+        server.send(303);
+        return;
+      }
+
       // Switching target also switches capture mode, so anything in flight has
       // to be closed against the target it was STARTED with, not the new one.
       if (polygonActive) closePolygon("target changed", true);
@@ -2075,6 +2658,270 @@ void handleSetTarget() {
       lastAction = "Target: " + currentWeed + " (" + currentControlType + ") - " + loggingMode;
     }
   }
+  // q=1 means the page asked by fetch() and will restyle itself. Redirecting
+  // would make it rebuild the whole dashboard, which is the thing that made
+  // changing weed feel slow: the state change is trivial, the page is not.
+  if (server.hasArg("q")) { server.send(204); return; }
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+// ==========================================================
+// MAP VIEW
+// ==========================================================
+//
+// The unit serves DATA; the phone draws. That split is deliberate: rendering a
+// map on the ESP32 would mean a much bigger page built on every refresh, and
+// page building is what stretches the loop - the thing that nearly cost us the
+// trigger. /linedata is a few hundred bytes and costs nothing to produce.
+//
+// The page works at three levels and falls back on its own:
+//   no network at all  -> an auto-scaled SVG of the line's own shape
+//   phone has internet -> the same line drawn over Esri imagery
+//   layer readable     -> today's already-synced points on top of that
+//
+// The middle case is the normal field one, because the unit joins the PHONE'S
+// hotspot: the phone is then both the access point and the route to the
+// internet, so tiles and unit data arrive over the same connection.
+void handleLineData() {
+  String j = "{\"rec\":";
+  j += (polygonActive && shapeIsLine) ? "1" : "0";
+  j += ",\"n\":" + String(vertexCount);
+  j += ",\"fix\":" + String(gpsUsable() ? "1" : "0");
+  if (live_lat != 0.0 || live_lon != 0.0) {
+    j += ",\"lat\":" + String(live_lat, 6) + ",\"lon\":" + String(live_lon, 6);
+  }
+  j += ",\"pts\":" + String(pointsLogged);
+  j += ",\"acc\":" + String(live_accuracy_m, 1);
+  j += ",\"bat\":" + String(live_battery_pct);
+  // Oldest first, so the page can draw it as a trail in capture order.
+  j += ",\"t\":\"";
+  for (int k = 0; k < trailCount; k++) {
+    int idx = (trailCount == TRAIL_MAX) ? ((trailNext + k) % TRAIL_MAX) : k;
+    j += String(trailLon[idx], 6) + "," + String(trailLat[idx], 6) +
+         "," + String(trailSeg[idx]) + "," + String(trailSlot[idx]) + ";";
+  }
+  j += "\"";
+  // The vertex string is already stored in the form the page wants, so it goes
+  // out as-is rather than being rebuilt into JSON arrays.
+  j += ",\"c\":\"";
+  if (polygonActive && shapeIsLine) j += currentPolygonCoords;
+  j += "\"}";
+  server.send(200, "application/json", j);
+}
+
+void handleMap() {
+  // The points layer's query endpoint, derived from the upload URL the unit
+  // already holds. NO TOKEN is put in this page: it would end up in the phone's
+  // browser cache and history. If the layer is not readable anonymously the
+  // overlay simply does not appear, and the line still draws.
+  String q = esriPointServiceURL;
+  q.replace("/addFeatures", "/query");
+
+  String h = "<!doctype html><html><head><meta charset='utf-8'>"
+             "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+             "<title>EcoSync map</title>"
+             "<link rel='stylesheet' href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
+             "<style>html,body{margin:0;background:#1b1b1b;color:#eee;"
+             "font-family:system-ui,sans-serif}#m,#f{height:70vh;width:100%;background:#111;display:block}"
+             "#f{display:none}#s{padding:10px 14px;font-size:0.95em}"
+             "a.b{display:inline-block;background:#2980b9;color:#fff;padding:12px 18px;"
+             "margin:8px 14px;border-radius:8px;text-decoration:none;font-weight:bold}</style>"
+             "</head><body><div id='m'></div><svg id='f' viewBox='0 0 1000 700'></svg>"
+             "<div id='s'>Loading&hellip;</div><div id='lg' style='padding:4px 14px 2px 14px;font-size:0.85em'></div><a class='b' href='/'>&larr; Dashboard</a>"
+             "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script><script>";
+
+  h += "var Q=\"" + q + "\";";
+  h += "var SLOTS=[";
+  for (int i = 0; i < NUM_SLOTS; i++) {
+    if (i) h += ",";
+    h += "\"" + jsEscape(slotWeed[i]) + "\"";
+  }
+  h += "];";
+
+  h += R"JS(
+var map=null,ln=null,me=null,tr=null,pl=null,got=false,ptsAt=0;
+var synced=-1;   // how many of today's points the layer returned, -1 = not asked yet
+function pv(c){var o=[],a=c.split(';');for(var i=0;i<a.length;i++){
+ var p=a[i].split(',');if(p.length>=2&&p[0]!==''){
+ var x=parseFloat(p[0]),y=parseFloat(p[1]);
+ if(!isNaN(x)&&!isNaN(y))o.push([y,x]);}}return o;}
+// Same string, but keeping the shape number so vertices can be joined up.
+function pvs(c){var o=[],a=c.split(';');for(var i=0;i<a.length;i++){
+ var p=a[i].split(',');if(p.length>=3&&p[0]!==''){
+ var x=parseFloat(p[0]),y=parseFloat(p[1]),g=parseInt(p[2],10),sl=parseInt(p[3],10);
+ if(!isNaN(x)&&!isNaN(y))o.push({ll:[y,x],seg:g||0,slot:isNaN(sl)?0:sl});}}return o;}
+// Chosen to stay apart from each other AND from the map's own colours: blue is
+// a finished shape, green the one recording, white is you.
+var SC=['#e74c3c','#f39c12','#9b59b6','#e84393','#2ecc71','#00cec9'];
+function sc(i){return SC[i%SC.length];}
+
+// Esri imagery. If Leaflet or the tiles cannot be reached we never get here and
+// the SVG takes over instead.
+function initMap(){
+ if(typeof L==='undefined')return false;
+ try{
+  map=L.map('m',{zoomControl:true});
+  // maxNativeZoom is the fix for tiles vanishing when you zoom in: Esri's
+  // imagery runs out at about z18 over rural Australia, and without this
+  // Leaflet asks for tiles that do not exist and draws nothing. With it, the
+  // last real tile is stretched instead - blurrier, but still a picture.
+  L.tileLayer('https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+   {maxZoom:21,maxNativeZoom:18,attribution:'Esri'}).addTo(map);
+  map.setView([-34.5,139.5],6);
+  return true;
+ }catch(e){return false;}
+}
+var haveMap=initMap();
+if(!haveMap){document.getElementById('m').style.display='none';
+ document.getElementById('f').style.display='block';}
+
+// Today's already-synced points, queried straight from the layer by the phone.
+// Local midnight converted to epoch ms sidesteps the UTC trap entirely: the
+// layer stores UTC and this comparison is in the same units.
+// Reloaded on a timer, not once. Two officers on the same block each see the
+// other's treated points as soon as both have synced, which is the whole value
+// of showing the layer rather than just this unit's own session.
+function loadPoints(){
+ if(!haveMap)return;
+ var now=Date.now();if(now-ptsAt<60000)return;ptsAt=now;
+ var d=new Date();d.setHours(0,0,0,0);
+ var u=Q+'?where=treatment_time%3E%3D'+d.getTime()+'&outFields=weed_species&f=geojson&returnGeometry=true&resultRecordCount=2000';
+ fetch(u).then(function(r){return r.json();}).then(function(g){
+  if(!g||!g.features||!g.features.length)return;
+  if(pl)pl.remove();
+  pl=L.geoJSON(g,{pointToLayer:function(f,ll){return L.circleMarker(ll,
+   {radius:8,color:'#ffffff',weight:2,fill:false,opacity:0.95});},
+   onEachFeature:function(f,l){if(f.properties&&f.properties.weed_species)
+    l.bindPopup(f.properties.weed_species);}}).addTo(map);
+  synced=g.features.length;
+ }).catch(function(){
+  // Silence here was wrong: a layer that will not answer looked identical to a
+  // layer with no records, and no way to tell them apart on a phone.
+  var e=document.getElementById('s');
+  e.textContent=e.textContent+'  |  synced points unavailable (layer needs sign-in?)';
+ });
+}
+
+function drawSvg(v){
+ var f=document.getElementById('f');while(f.firstChild)f.removeChild(f.firstChild);
+ if(v.length<2)return;
+ var la=v.map(function(p){return p[0];}),lo=v.map(function(p){return p[1];});
+ var laMin=Math.min.apply(null,la),laMax=Math.max.apply(null,la);
+ var loMin=Math.min.apply(null,lo),loMax=Math.max.apply(null,lo);
+ var k=Math.cos((laMin+laMax)/2*Math.PI/180);           // east-west is shorter
+ var w=(loMax-loMin)*k,hh=(laMax-laMin);
+ var sp=Math.max(w,hh)||1e-6,sc=620/sp;
+ var pts=v.map(function(p){
+  var x=500+((p[1]-(loMin+loMax)/2)*k)*sc;
+  var y=350-((p[0]-(laMin+laMax)/2))*sc;                // north is up
+  return x.toFixed(1)+','+y.toFixed(1);}).join(' ');
+ var ns='http://www.w3.org/2000/svg';
+ var pl=document.createElementNS(ns,'polyline');
+ pl.setAttribute('points',pts);pl.setAttribute('fill','none');
+ pl.setAttribute('stroke','#3498db');pl.setAttribute('stroke-width','4');
+ pl.setAttribute('stroke-linejoin','round');f.appendChild(pl);
+ var last=pts.split(' ').pop().split(',');
+ var c=document.createElementNS(ns,'circle');
+ c.setAttribute('cx',last[0]);c.setAttribute('cy',last[1]);c.setAttribute('r','7');
+ c.setAttribute('fill','#e74c3c');f.appendChild(c);
+ // A scale bar, because an auto-fitted shape has no inherent size.
+ var m=sp*111320*0.25,t=document.createElementNS(ns,'text');
+ t.setAttribute('x','20');t.setAttribute('y','680');t.setAttribute('fill','#999');
+ t.setAttribute('font-size','22');
+ t.textContent='about '+(m>1000?(m/1000).toFixed(1)+' km':Math.round(m)+' m')+' across a quarter of this view';
+ f.appendChild(t);
+}
+
+function tick(){
+ fetch('/linedata').then(function(r){return r.json();}).then(function(d){
+  var v=pv(d.c||'');
+  var s;
+  if(d.rec){
+   // Live length, worked out the same way the firmware does it on upload, so
+   // the figure on the screen matches the one that ends up in the attribute.
+   var m=0;
+   for(var i=1;i<v.length;i++){
+    var k=Math.cos(v[i][0]*Math.PI/180);
+    var dy=(v[i][0]-v[i-1][0])*111320,dx=(v[i][1]-v[i-1][1])*111320*k;
+    m+=Math.sqrt(dx*dx+dy*dy);
+   }
+   s='Recording - '+d.n+' vertices, '+(m>1000?(m/1000).toFixed(2)+' km':Math.round(m)+' m');
+  }else{
+   s=d.pts+' points this session';
+  }
+  if(!d.fix)s+='  |  NO USABLE FIX';
+  else if(d.acc!==undefined)s+='  |  \u00b1'+d.acc+' m';
+  if(d.bat!==undefined&&d.bat>0)s+='  |  battery '+d.bat+'%';
+  if(synced>=0)s+='  |  '+synced+' synced today';
+  document.getElementById('s').textContent=s;
+  if(haveMap){
+   var ts=pvs(d.t||''),all=[];
+   if(ts.length){
+    if(tr)tr.remove();
+    var g=L.layerGroup(),segs={};
+    for(var i=0;i<ts.length;i++){
+     all.push(ts[i].ll);
+     if(ts[i].seg===0){
+      // A standalone point: yellow dot.
+      var col=sc(ts[i].slot);
+      g.addLayer(L.circleMarker(ts[i].ll,{radius:4,color:'#000',weight:1,
+        fillColor:col,fillOpacity:0.95}));
+     }else{
+      if(!segs[ts[i].seg])segs[ts[i].seg]={pts:[],slot:ts[i].slot};
+      segs[ts[i].seg].pts.push(ts[i].ll);
+     }
+    }
+    // Shape vertices joined into the line they came from, in blue so a
+    // finished line never looks like a row of points.
+    for(var k in segs){if(segs[k].pts.length>1)
+     g.addLayer(L.polyline(segs[k].pts,{color:sc(segs[k].slot),weight:4,opacity:0.9}));}
+    tr=g.addTo(map);
+    if(!got&&all.length){map.fitBounds(L.latLngBounds(all),{padding:[30,30]});got=true;}
+   }
+   if(v.length>1){
+    if(ln)ln.remove();
+    ln=L.polyline(v,{color:'#1abc9c',weight:5}).addTo(map);
+    if(!got){map.fitBounds(ln.getBounds(),{padding:[30,30]});got=true;}
+   }
+   if(d.lat&&d.lon){
+    if(me)me.remove();
+    me=L.circleMarker([d.lat,d.lon],{radius:7,color:'#1b1b1b',weight:3,
+      fillColor:'#ffffff',fillOpacity:1}).addTo(map);
+    if(!got){map.setView([d.lat,d.lon],17);got=true;}
+   }
+   loadPoints();
+  }else{drawSvg(v.length>1?v:pv(d.t||''));}
+ }).catch(function(){});
+}
+(function(){
+ var l=document.getElementById('lg'),h='';
+ for(var i=0;i<SLOTS.length;i++){
+  h+="<span style='display:inline-block;margin:2px 10px 2px 0;white-space:nowrap'>"
+   +"<span style='display:inline-block;width:11px;height:11px;border-radius:50%;"
+   +"background:"+sc(i)+";border:1px solid #000;vertical-align:-1px'></span> "
+   +SLOTS[i]+"</span>";
+ }
+ h+="<span style='display:inline-block;margin:2px 10px;white-space:nowrap'>"
+  +"<span style='display:inline-block;width:11px;height:11px;border-radius:50%;"
+  +"border:2px solid #fff;vertical-align:-1px'></span> synced</span>";
+ l.innerHTML=h;
+})();
+tick();setInterval(tick,3000);
+)JS";
+
+  h += "</script></body></html>";
+  server.send(200, "text/html", h);
+}
+
+// Clears notices that describe something that ALREADY happened and has been
+// read. It deliberately does not clear configWarning: that one reports a live
+// condition - the unit is running on built-in defaults, with the wrong device
+// id and no network - and hiding it would turn a visible fault into a silent
+// one.
+void handleDismiss() {
+  bootNoticeDismissed = true;
+  polyRecoveryNote    = "";
   server.sendHeader("Location", "/");
   server.send(303);
 }
@@ -2154,7 +3001,11 @@ void handleConfig() {
           "Each dashboard button carries its own weed, control method, capture mode and timing. "
           "Setting the timing here is what stops you editing it in the field.</div>";
 
-  const char* modeNames[3] = { "POINT", "CONTINUOUS", "POLYGON" };
+  const char* modeNames[]  = { "POINT", "CONTINUOUS", "POLYGON", "LINE" };
+  // Counted from the array, not typed as a literal. The literal 3 that used to
+  // be in the loop below outlived the arrival of LINE, so the mode existed in
+  // the firmware and in the help text but could not be chosen on the page.
+  const int   modeCount    = sizeof(modeNames) / sizeof(modeNames[0]);
   for (int i = 0; i < NUM_SLOTS; i++) {
     String n  = String(i + 1);
     String fT = "t" + n, fC = "c" + n, fM = "m" + n, fA = "a" + n, fB = "b" + n;
@@ -2165,7 +3016,7 @@ void handleConfig() {
 
     html += "<label>Capture mode</label><br>";
     html += "<select name='" + fM + "' style='padding:10px; margin-bottom:4px; width:82%; font-size:1em; text-align:center;'>";
-    for (int m = 0; m < 3; m++) {
+    for (int m = 0; m < modeCount; m++) {
       html += "<option value='" + String(modeNames[m]) + "'";
       if (slotMode[i] == modeNames[m]) html += " selected";
       html += ">" + String(modeNames[m]) + "</option>";
@@ -2173,7 +3024,8 @@ void handleConfig() {
     html += "</select>";
     html += "<div style='font-size:0.7em; color:#bdc3c7; margin-bottom:12px;'>"
             "POINT = one record per pull. CONTINUOUS = a record every few seconds while held. "
-            "POLYGON = walk the perimeter.</div>";
+            "POLYGON = walk the perimeter. LINE = press to start, follow the route, "
+            "press again to end - bait trails and effort lines.</div>";
 
     String hintA, hintB;
     if (slotMode[i] == "POINT") {
@@ -2183,6 +3035,10 @@ void handleConfig() {
       hintA = "Seconds between fixes while the trigger is held";
       hintB = "Release hold (s) - how long the trigger can be up before the run ends. "
               "Releasing and pulling again on the same weed keeps one run.";
+    } else if (slotMode[i] == "LINE") {
+      hintA = "Distance travelled before a new vertex (m)";
+      hintB = "Idle timeout (s). 0 = never, which is what you want - a line is "
+              "ended by pressing the trigger again, not by a timer.";
     } else {
       hintA = "Distance travelled before a new vertex (m)";
       hintB = "Trigger silence that closes the polygon (s)";
@@ -2206,7 +3062,7 @@ void handleConfig() {
   html += roRow("Max GPS accuracy", String(gpsMaxAccM, 1) + " m");
   html += roRow("Point cooldown", String(pointCooldownS, 1) + " s");
   html += roRow("Movement that logs early", pointMinDistM > 0.0 ? String(pointMinDistM, 1) + " m" : String("off"));
-  html += roRow("Polygon idle timeout", String(polyTimeoutS, 1) + " s");
+  html += roRow("Polygon / line idle timeout", polyTimeoutS > 0.0 ? (String(polyTimeoutS, 1) + " s") : String("off"));
   html += roRow("Vertex spacing", String(polyMinVertexM, 1) + " m");
   html += roRow("Smoothing tolerance", polySimplifyM > 0.0 ? String(polySimplifyM, 1) + " m" : String("off"));
   html += "<div style='font-size:0.7em; color:#7f8c8d; margin:10px 8% 0 8%;'>These control data quality and are set by your administrator. Widening them silently degrades every record.</div>";
@@ -2233,7 +3089,8 @@ void handleSaveConfig() {
     String oldMode = slotMode[i];
     if (server.hasArg(fM.c_str())) {
       String m = argTrimmed(fM.c_str()); m.toUpperCase();
-      if (m == "POINT" || m == "CONTINUOUS" || m == "POLYGON") slotMode[i] = m;
+      if (m == "POINT" || m == "CONTINUOUS" || m == "POLYGON" ||
+          m == "LINE") slotMode[i] = m;
     }
 
     if (slotMode[i] != oldMode) {
@@ -2278,7 +3135,22 @@ void handleWifiScan() {
 
   html += "<div style='width:86%; margin:0 auto 18px auto; text-align:left; font-size:0.85em;'>";
   html += "<b>Configured network:</b> " + htmlEscape(wifiSsid.length() ? wifiSsid : String("(none set)")) + "<br>";
-  html += "<b>Password stored:</b> " + String(wifiPass.length() ? "yes" : "NO") + "<br>";
+  html += "<b>Trigger presses accepted:</b> " + String(triggerAccepted) +
+          " &nbsp; of " + String(triggerPresses) + " edges"
+          " &nbsp; (pin changes " + String(triggerRawChanges) + ")<br>";
+  html += "<b>Hold to log:</b> " + String(triggerHoldMs) + " ms"
+          " &nbsp; (" + String(triggerTooBrief) + " touches too brief, "
+          + String(triggerRefused) + " inside the lockout)<br>";
+  html += "<div style='font-size:0.85em; opacity:0.75; margin-bottom:6px;'>"
+          "Accepted is the figure to read: one per real press. Edges counts every "
+          "interrupt, bounce included, so it sits well above it. "
+          "<b>Too brief</b> counts pads touched but not held long enough to log - "
+          "a few of those over a day is the setting doing its job. If it climbs "
+          "while points go missing, lower hold to log in config.txt; if stray "
+          "points are still appearing, raise it.</div>";
+  html += "<b>Starlink password stored:</b> " + String(wifiPass.length() ? "yes" : "NO") + "<br>";
+  html += "<b>Hotspot SSID:</b> " + htmlEscape(wifiSsid2.length() ? wifiSsid2 : String("(none)")) + "<br>";
+  html += "<b>Hotspot password stored:</b> " + String(wifiPass2.length() ? "yes" : "NO") + "<br>";
   html += "<b>Station status:</b> " + String(wifiStatusName(WiFi.status())) + "<br>";
   if (wifiLastError.length()) html += "<b>Last failure:</b> " + htmlEscape(wifiLastError) + "<br>";
   html += "<b>Access point:</b> " + String(apMode ? "running" : "off") + "<br>";
@@ -2300,7 +3172,8 @@ void handleWifiScan() {
     for (int i = 0; i < n; i++) {
       String ssid = WiFi.SSID(i);
       int rssi = WiFi.RSSI(i);
-      bool isMine = (wifiSsid.length() > 0 && ssid == wifiSsid);
+      bool isMine = (wifiSsid.length()  > 0 && ssid == wifiSsid) ||
+                    (wifiSsid2.length() > 0 && ssid == wifiSsid2);
       if (isMine) foundConfigured = true;
 
       String colour = "#2ecc71";
@@ -2320,8 +3193,9 @@ void handleWifiScan() {
 
   html += "<div style='width:86%; margin:18px auto; text-align:left; font-size:0.85em; "
           "background:#34495e; padding:12px; border-radius:6px;'>";
-  if (wifiSsid.length() == 0) {
-    html += "No network is configured. Set one under Advanced Settings.";
+  if (!wifiSlotConfigured(0) && !wifiSlotConfigured(1)) {
+    html += "No network is configured. Set the Starlink network or your phone "
+            "hotspot under Advanced Settings.";
   } else if (foundConfigured) {
     html += "<b style='color:#2ecc71;'>Your network was found.</b> If it still will not join, "
             "the password is the most likely cause &mdash; re-enter it under Advanced Settings. "
@@ -2491,8 +3365,10 @@ void handleAdvanced() {
           "Written to job_id on every record. Set device_id in config.txt on the SD card.</div>";
 
   html += "<h3>WI-FI</h3>";
-  html += textField("Wi-Fi Network (SSID)", "wssid", wifiSsid, false, "Leave blank to stay in setup access-point mode");
-  html += secretField("Wi-Fi Password", "wpass", wifiPass.length() > 0, "");
+  html += textField("1. Starlink / vehicle network (SSID)", "wssid", wifiSsid, false, "Leave both blank to stay in setup access-point mode");
+  html += secretField("Starlink password", "wpass", wifiPass.length() > 0, "");
+  html += textField("2. Phone hotspot (SSID)", "wssid2", wifiSsid2, false, "Preferred in the field - the phone keeps its data, so Field Maps still works");
+  html += secretField("Hotspot password", "wpass2", wifiPass2.length() > 0, "iPhone: turn on Maximise Compatibility. This unit is 2.4 GHz only.");
 
   html += textField("Transmit power (dBm)", "txdbm", String(wifiTxDbm, 1), false, "2.0 to 19.5. Raise if the unit cannot reach the router from the vehicle.");
 
@@ -2531,7 +3407,11 @@ void handleAdvanced() {
   html += textField("Max GPS accuracy (m)", "acc", String(gpsMaxAccM, 1), false, "Sprays are rejected above this figure");
   html += textField("Min vertex spacing (m)", "pdist", String(polyMinVertexM, 1), false, "Distance travelled before a new polygon point");
   html += textField("Smoothing tolerance (m)", "psimp", String(polySimplifyM, 1), false, "Removes GPS jitter from polygon edges on upload. 0 disables.");
-  html += textField("Polygon idle timeout (s)", "ptime", String(polyTimeoutS, 1), false, "Trigger silence that closes an open polygon");
+  html += textField("Polygon / line idle timeout (s)", "ptime", String(polyTimeoutS, 1), false, "Trigger silence that closes an open shape. 0 = never, which is what LINE wants");
+
+  html += "<h3>TRIGGER</h3>";
+  html += "<div style='font-size:0.7em; color:#bdc3c7; margin-bottom:12px; padding:0 8%;'>How long the pad must be held shut before a press is logged. Raise it if a finger resting on the pad logs points you did not mean; lower it if deliberate presses are being missed. The serial log reports every touch that was too brief.</div>";
+  html += textField("Hold to log (ms)", "thold", String(triggerHoldMs), false, "20-2000 ms. 150 suits the Olight pad. 0 = log on the edge, no duration check.");
 
   html += "<h3>POINT DE-DUPLICATION</h3>";
   html += "<div style='font-size:0.7em; color:#bdc3c7; margin-bottom:12px; padding:0 8%;'>A large weed can take many trigger pulls. A press logs a new point when EITHER the cooldown has passed OR you have moved far enough to be at a different plant.</div>";
@@ -2551,6 +3431,7 @@ void handleSaveAdvanced() {
   if (!requireAuth()) return;
 
   String oldSsid = wifiSsid, oldPass = wifiPass;
+  String oldSsid2 = wifiSsid2, oldPass2 = wifiPass2;
 
   if (server.hasArg("wssid"))  wifiSsid       = argTrimmed("wssid");
   if (server.hasArg("txdbm"))  wifiTxDbm      = argTrimmed("txdbm").toFloat();
@@ -2566,6 +3447,8 @@ void handleSaveAdvanced() {
   }
   // Empty submission = keep stored value, because the field is served empty.
   if (server.hasArg("wpass")  && server.arg("wpass").length()  > 0) wifiPass  = argTrimmed("wpass");
+  if (server.hasArg("wssid2")) wifiSsid2 = argTrimmed("wssid2");
+  if (server.hasArg("wpass2") && server.arg("wpass2").length() > 0) wifiPass2 = argTrimmed("wpass2");
   if (server.hasArg("apssid")) apSsid         = argTrimmed("apssid");
   if (server.hasArg("appass") && argTrimmed("appass").length() > 0) apPass    = argTrimmed("appass");
   if (server.hasArg("apidle")) apIdleStopMin  = argTrimmed("apidle").toFloat();
@@ -2578,6 +3461,7 @@ void handleSaveAdvanced() {
   if (server.hasArg("pdist"))  polyMinVertexM = argTrimmed("pdist").toFloat();
   if (server.hasArg("psimp"))  polySimplifyM  = argTrimmed("psimp").toFloat();
   if (server.hasArg("ptime"))  polyTimeoutS   = argTrimmed("ptime").toFloat();
+  if (server.hasArg("thold"))  triggerHoldMs  = (unsigned long)argTrimmed("thold").toInt();
   if (server.hasArg("pcool"))  pointCooldownS = argTrimmed("pcool").toFloat();
   if (server.hasArg("pmind"))  pointMinDistM  = argTrimmed("pmind").toFloat();
 
@@ -2591,7 +3475,11 @@ void handleSaveAdvanced() {
   if (saveConfigToSD()) lastAction = "Advanced settings saved.";
   else                  lastAction = "CONFIG SAVE FAILED - check SD card";
 
-  if (wifiSsid != oldSsid || wifiPass != oldPass) wifiReconfigured = true;
+  if (wifiSsid != oldSsid || wifiPass != oldPass ||
+      wifiSsid2 != oldSsid2 || wifiPass2 != oldPass2) {
+    wifiReconfigured = true;
+    wifiSlot = 0;          // start again from the top of the list
+  }
   lastWifiAttempt = 0;   // let maintainWiFi retry straight away
 
   server.sendHeader("Location", "/");
@@ -2884,8 +3772,8 @@ String buildPolygonFeature(const String &line) {
   }
 
   // Static so these do not land on the stack.
-  static double xs[MAX_POLY_VERTICES];
-  static double ys[MAX_POLY_VERTICES];
+  double *xs = shapeXs;      // shared buffers - see the note at MAX_POLY_VERTICES
+  double *ys = shapeYs;
   int n = 0;
 
   int start = 0;
@@ -2990,6 +3878,112 @@ String buildPolygonFeature(const String &line) {
   return f;
 }
 
+// A polyline. Same stored record as a polygon, and the same jitter smoothing,
+// but the ring is never closed and winding order is meaningless - ArcGIS only
+// enforces clockwise outer rings on polygons.
+String buildLineFeature(const String &line) {
+  int p1 = line.indexOf('|');            if (p1 < 0) return "";
+  int p2 = line.indexOf('|', p1 + 1);    if (p2 < 0) return "";
+  int p3 = line.indexOf('|', p2 + 1);    if (p3 < 0) return "";
+
+  String weed      = line.substring(0, p1);
+  String coordStr  = line.substring(p1 + 1, p2);
+  String epochStr  = line.substring(p2 + 1, p3);
+
+  int p4 = line.indexOf('|', p3 + 1);
+  String jobNumber, controlType, accuracyStr;
+  if (p4 < 0) {
+    jobNumber = line.substring(p3 + 1);
+  } else {
+    jobNumber = line.substring(p3 + 1, p4);
+    int p5 = line.indexOf('|', p4 + 1);
+    if (p5 < 0) { controlType = line.substring(p4 + 1); }
+    else        { controlType = line.substring(p4 + 1, p5);
+                  accuracyStr = line.substring(p5 + 1); }
+  }
+
+  double *lxs = shapeXs;     // same buffers as the polygon builder
+  double *lys = shapeYs;
+  int n = 0;
+
+  int start = 0;
+  while (start < (int)coordStr.length()) {
+    if (n >= MAX_POLY_VERTICES) {
+      Serial.println("Warning: line exceeded MAX_POLY_VERTICES, truncating.");
+      break;
+    }
+    int semi = coordStr.indexOf(';', start);
+    int end  = (semi < 0) ? (int)coordStr.length() : semi;
+
+    String pt = coordStr.substring(start, end);
+    int comma = pt.indexOf(',');
+    if (comma > 0) {
+      double x = pt.substring(0, comma).toDouble();
+      double y = pt.substring(comma + 1).toDouble();
+      bool valid = !(x == 0.0 && y == 0.0) &&
+                   y >= -90.0 && y <= 90.0 && x >= -180.0 && x <= 180.0;
+      if (valid) { lxs[n] = x; lys[n] = y; n++; }
+    }
+
+    if (semi < 0) break;
+    start = semi + 1;
+  }
+
+  if (n < 2) return "";
+
+  // Smoothing is skipped on a short line for the same reason it is skipped on
+  // a small ring: with only a couple of vertices every one of them sits within
+  // tolerance of the line between its neighbours, and the shape disappears.
+  if (polySimplifyM > 0.0 && n > 2) {
+    int before = n;
+    n = simplifyPolyline(lxs, lys, n, (double)polySimplifyM);
+    if (n < 2) { n = before; }      // never simplify a line out of existence
+    else if (n != before) {
+      Serial.println("Line smoothed: " + String(before) + " -> " + String(n) + " vertices.");
+    }
+  }
+
+  // Length, summed over the geometry AS UPLOADED - after smoothing, not before.
+  //
+  // The two differ slightly, and it matters which one is stored: anyone who
+  // measures the line in ArcGIS Pro is measuring the smoothed shape, and an
+  // attribute that disagreed with the map would be the thing they stopped
+  // trusting. Summing short geodesic steps also avoids the trap in the obvious
+  // alternative - a hosted layer in Web Mercator reports Shape__Length with a
+  // scale error of about 20% at this latitude.
+  double lengthM = 0.0;
+  for (int i = 1; i < n; i++) {
+    lengthM += metresBetween(lys[i - 1], lxs[i - 1], lys[i], lxs[i]);
+  }
+
+  String paths = "[[";
+  paths.reserve(n * 26 + 32);
+  for (int i = 0; i < n; i++) {
+    if (i > 0) paths += ",";
+    paths += "[" + String(lxs[i], 6) + "," + String(lys[i], 6) + "]";
+  }
+  paths += "]]";
+
+  String esriTimeMs = epochStr + "000";
+  String attrs = "\"weed_species\":\"" + jsonEscape(weed) + "\"," +
+                 "\"treatment_time\":" + esriTimeMs + "," +
+                 "\"job_id\":\"" + jsonEscape(String(currentJobID)) + "\"," +
+                 "\"Job_Number\":\"" + jsonEscape(jobNumber) + "\"";
+  if (controlType.length() > 0) {
+    attrs += ",\"control_type\":\"" + jsonEscape(controlType) + "\"";
+  }
+  if (accuracyStr.length() > 0) {
+    double a = accuracyStr.toDouble();
+    if (a > 0.0) attrs += ",\"gps_accuracy_m\":" + String(a, 2);
+  }
+  attrs += ",\"line_length_m\":" + String(lengthM, 1);
+
+  String f = "{\"geometry\":{\"paths\":" + paths +
+             ",\"spatialReference\":{\"wkid\":4326}},\"attributes\":{" +
+             attrs + "}}";
+  return f;
+}
+
 // ------------------------------------------------------------------
 // 11e. POST one batch, with retries
 // ------------------------------------------------------------------
@@ -3026,8 +4020,12 @@ bool postBatch(WiFiClientSecure &client, const char *url,
       return true;
     }
 
+    // A NEGATIVE code is the ESP32 HTTP client, not the server: -3 is
+    // send-payload-failed and -5 is connection-lost, both of which usually
+    // mean memory rather than anything wrong at the far end.
     Serial.println("Batch attempt " + String(attempt) + " failed (HTTP " +
-                   String(code) + "): " + resp.substring(0, 200));
+                   String(code) + ", free heap " + String(ESP.getFreeHeap()) +
+                   "): " + resp.substring(0, 200));
     if (attempt < 3) delay(1000L * attempt);
   }
   return false;
@@ -3036,11 +4034,34 @@ bool postBatch(WiFiClientSecure &client, const char *url,
 // ------------------------------------------------------------------
 // 11f. Sync one pending file
 // ------------------------------------------------------------------
+// Which geometry the queued records carry. This was a bool while there were
+// only two shapes; a third makes the bool a lie.
+//
+// The PARAMETER below is a plain uint8_t rather than this enum, deliberately.
+// Arduino generates prototypes for every function in a .ino and inserts them
+// above the sketch, so a user-defined type in a signature is referenced before
+// it exists and the build fails with "'GeomKind' has not been declared". The
+// enumerators still give the call sites and the switch their names.
+enum GeomKind { GEOM_POINT, GEOM_POLYGON, GEOM_LINE };
+
 // Returns true if the file was fully synced and removed.
 // On failure, the file is rewritten containing ONLY unsynced records and
 // 'counter' is updated to how many remain.
 bool syncPendingFile(const char *path, const char *tmpPath, const char *url,
-                     bool isPolygon, int &counter, WiFiClientSecure &client) {
+                     uint8_t kind, int &counter, WiFiClientSecure &client) {
+
+  // A queue with nowhere to post is not an error: the records stay on the card
+  // and go up once the layer URL is set. Silently "succeeding" would be worse -
+  // it would clear the counter and make a backlog look like a clean sync.
+  if (url == NULL || url[0] == '\0') {
+    if (SD.exists(path)) {
+      Serial.println(String("No service URL configured for ") + path +
+                     " - holding records on the card.");
+      return false;
+    }
+    counter = 0;
+    return true;
+  }
 
   if (!SD.exists(path)) { counter = 0; return true; }
 
@@ -3061,9 +4082,15 @@ bool syncPendingFile(const char *path, const char *tmpPath, const char *url,
     line.trim();
     if (line.length() == 0) continue;
 
-    String feature = isPolygon ? buildPolygonFeature(line) : buildPointFeature(line);
+    String feature;
+    const char *badTag;
+    switch (kind) {
+      case GEOM_POLYGON: feature = buildPolygonFeature(line); badTag = "BAD_POLYGON"; break;
+      case GEOM_LINE:    feature = buildLineFeature(line);    badTag = "BAD_LINE";    break;
+      default:           feature = buildPointFeature(line);   badTag = "BAD_POINT";   break;
+    }
     if (feature.length() == 0) {
-      quarantineLine(isPolygon ? "BAD_POLYGON" : "BAD_POINT", line);
+      quarantineLine(badTag, line);
       continue;   // dropped from pending, preserved in /rejected.csv
     }
 
@@ -3137,6 +4164,10 @@ bool syncPendingFile(const char *path, const char *tmpPath, const char *url,
 // ------------------------------------------------------------------
 void syncStoredData() {
   Serial.println("\n--- Starting Sync ---");
+  // Printed because a shortage here does not announce itself: TLS simply stops
+  // being able to open a connection, and the upload failures look like network
+  // faults. Below about 40 KB free, suspect memory before suspecting ArcGIS.
+  Serial.println("Free heap: " + String(ESP.getFreeHeap()) + " bytes");
 
   if (!sdReady) {
     lastSyncStatus = "NO SD CARD";
@@ -3164,15 +4195,21 @@ void syncStoredData() {
   // Points and polygons sync independently -- a failure in one does not
   // prevent the other from being uploaded.
   bool okPts   = syncPendingFile(PENDING_PTS, TMP_PTS,
-                                 esriPointServiceURL, false, unsyncedPoints, client);
+                                 esriPointServiceURL.c_str(), GEOM_POINT,
+                                 unsyncedPoints, client);
   bool okTrack = syncPendingFile(PENDING_TRACK, TMP_TRACK,
-                                 esriTrackServiceURL, false, unsyncedTrack, client);
+                                 esriTrackServiceURL.c_str(), GEOM_POINT,
+                                 unsyncedTrack, client);
   bool okPoly  = syncPendingFile(PENDING_POLY, TMP_POLY,
-                                 esriPolygonServiceURL, true, unsyncedPolygons, client);
+                                 esriPolygonServiceURL.c_str(), GEOM_POLYGON,
+                                 unsyncedPolygons, client);
+  bool okLine  = syncPendingFile(PENDING_LINE, TMP_LINE,
+                                 esriLineServiceURL.c_str(), GEOM_LINE,
+                                 unsyncedLines, client);
 
-  if (okPts && okTrack && okPoly) {
+  if (okPts && okTrack && okPoly && okLine) {
     lastSyncStatus = "SUCCESS!";
-    Serial.println("All Points, Track and Polygons Synced Successfully!");
+    Serial.println("All Points, Track, Polygons and Lines Synced Successfully!");
   } else {
     // Name what is still on the card rather than just which call failed - the
     // number left is what decides whether it is safe to end the day.
@@ -3180,6 +4217,7 @@ void syncStoredData() {
     if (!okPts)   left += String(unsyncedPoints) + " pts ";
     if (!okTrack) left += String(unsyncedTrack) + " trk ";
     if (!okPoly)  left += String(unsyncedPolygons) + " polys ";
+    if (!okLine)  left += String(unsyncedLines) + " lines ";
     left.trim();
     lastSyncStatus = "SYNC ERROR - " + left + " left";
   }
@@ -3197,7 +4235,7 @@ void setup() {
   delay(2500);
   Serial.begin(115200);
   delay(1000);
-  Serial.println("\n--- MSA EcoSync Field Booting ---");
+  Serial.println("\n--- FPE EcoSync Field Booting ---");
   Serial.println("Firmware build: " + String(FIRMWARE_BUILD));
   Serial.println("Restart #" + String(bootCount) + " - reason: " + bootResetReason);
   if (bootWasUnexpected) {
@@ -3246,6 +4284,7 @@ void setup() {
   logBootToSD();
 
   loadConfigFromSD();
+  loadLastPoint();
 
   // AFTER the card is read, not with the build banner above. device_id comes
   // from config.txt, so printing it earlier would have shown the compiled
@@ -3294,7 +4333,7 @@ void setup() {
   // built for a phone - so a quick squeeze that opened and closed inside that
   // window was invisible: no record, no counter, no message. An interrupt
   // cannot be outrun by a slow loop.
-  attachInterrupt(digitalPinToInterrupt(TRIGGER_PIN), triggerISR, FALLING);
+  attachInterrupt(digitalPinToInterrupt(TRIGGER_PIN), triggerISR, CHANGE);
 
   // --- GPS ---
   // Try UART first (DAN-F10N), then fall back to I2C (the older M9). A wiring
@@ -3458,6 +4497,9 @@ void setup() {
   server.on("/setMode",     HTTP_GET,  handleSetMode);
   server.on("/setTarget",   HTTP_GET,  handleSetTarget);
   server.on("/forceSync",   HTTP_GET,  handleForceSync);
+  server.on("/dismiss",     HTTP_GET,  handleDismiss);
+  server.on("/map",         HTTP_GET,  handleMap);
+  server.on("/linedata",    HTTP_GET,  handleLineData);
   server.on("/config",       HTTP_GET,  handleConfig);        // open to operators
   server.on("/saveConfig",   HTTP_POST, handleSaveConfig);    // field fields only
   server.on("/gstretry",   HTTP_GET,  handleGstRetry);
@@ -3501,7 +4543,12 @@ void loop() {
 
   // --- Auto-timeout. Deliberately NOT gated on systemArmed: disarming closes
   //     the polygon via the handler, so a polygon can never be left hanging. ---
-  if (polygonActive &&
+  // Zero means never. LINE defaults to it, because a bait run stops to refill
+  // and a timeout would chop one trail into several - the second press is what
+  // ends a line. Without this guard zero would be the WORST case rather than
+  // the safest: (now - lastActivity) > 0 is true on almost every pass, so the
+  // shape would close immediately after it opened.
+  if (polygonActive && polyTimeoutS > 0.0 &&
       (currentMillis - lastTriggerActivity > (unsigned long)(polyTimeoutS * 1000.0))) {
     closePolygon("idle timeout", true);
   }
@@ -3524,7 +4571,62 @@ void loop() {
   // Acting on the falling edge cannot be defeated by a slow loop: any press the
   // firmware SEES, it acts on.
   int  readTriggerRaw = digitalRead(TRIGGER_PIN);
+
+  // Nothing counts until the pin has been seen settled HIGH once. The hold
+  // timer below handles press-to-press re-arming on its own, but it cannot
+  // tell a pad resting closed at power-on from a squeeze that began before
+  // the unit was listening - so until there has been a genuine release, the
+  // trigger stays dead. This is the boot-edge guard, and nothing else.
+  if (readTriggerRaw == HIGH) {
+    if (triggerHighSince == 0) triggerHighSince = currentMillis;
+    if (currentMillis - triggerHighSince >= triggerReleaseSettleMs) {
+      triggerSeenReleased = true;
+    }
+  } else {
+    triggerHighSince = 0;      // any dip restarts the settle timer
+  }
   bool triggerFired   = false;
+
+  // --- Has a press finished? ---------------------------------------------
+  //
+  // A closure is over once the pin is sitting HIGH and no edge has arrived for
+  // the settle time. The duration comes from the ISR's two timestamps, so it
+  // is correct no matter how long the loop took to get here - being late only
+  // logs the point late.
+  unsigned long heldMs    = 0;
+  bool          havePress = false;
+  if (readTriggerRaw == HIGH) {
+    portENTER_CRITICAL(&triggerMux);
+    if (isrFirstLow != 0 &&
+        (currentMillis - isrLastEdge) >= triggerReleaseSettleMs) {
+      heldMs      = isrLastEdge - isrFirstLow;   // first contact to last release bounce
+      isrFirstLow = 0;
+      havePress   = true;
+    }
+    portEXIT_CRITICAL(&triggerMux);
+  }
+
+  // triggerSeenReleased is still the boot guard: a pad resting closed at
+  // power-on must not log a point before anyone has touched it.
+  if (havePress && triggerSeenReleased) {
+    if (heldMs >= triggerHoldMs) {
+      if (currentMillis - lastAcceptedPress > triggerDebounceDelay) {
+        lastAcceptedPress = currentMillis;
+        triggerFired      = true;
+        triggerAccepted++;
+        Serial.println("TRIGGER ACCEPTED #" + String(triggerAccepted) +
+                       "  (held " + String(heldMs) + "ms)");
+      } else {
+        triggerRefused++;
+        Serial.println("Trigger press ignored: within the " +
+                       String(triggerDebounceDelay) + "ms lockout");
+      }
+    } else {
+      triggerTooBrief++;
+      Serial.println("Trigger ignored: held " + String(heldMs) +
+                     "ms, needs " + String(triggerHoldMs) + "ms");
+    }
+  }
 
   // A HELD trigger is activity too.
   //
@@ -3562,13 +4664,11 @@ void loop() {
   // The INTERRUPT is now the authority on "a press happened". Debouncing stays
   // here rather than in the ISR, which keeps millis() out of interrupt context
   // - the ISR does nothing but raise a flag.
+  // Edge count, kept purely as a cross-check: if this climbs while accepted
+  // presses do not, the pad is chattering rather than the firmware sleeping.
   if (triggerLatched) {
     triggerLatched = false;
     triggerPresses++;
-    if (currentMillis - lastAcceptedPress > triggerDebounceDelay) {
-      lastAcceptedPress = currentMillis;
-      triggerFired = true;
-    }
   }
 
   if (readTriggerRaw != lastTriggerRaw) {
@@ -3581,9 +4681,10 @@ void loop() {
     Serial.println("Trigger pin -> " + String(readTriggerRaw == LOW ? "LOW (pressed)" : "HIGH (released)") +
                    "  [changes=" + String(triggerRawChanges) +
                    " presses=" + String(triggerPresses) +
+                   " accepted=" + String(triggerAccepted) +
+                   " brief=" + String(triggerTooBrief) +
                    " armed=" + String(systemArmed ? "YES" : "NO") +
                    " mode=" + loggingMode +
-                   " fired=" + String(triggerFired ? "YES" : "no") +
                    " loop=" + String(loopLastMs) + "ms max=" + String(loopMaxMs) + "ms]");
   }
   lastTriggerRaw     = readTriggerRaw;
@@ -3703,7 +4804,15 @@ void loop() {
       // CONTINUOUS is handled above, on the trigger's state. A press edge here
       // would double-count it and, worse, would count a refused fix as a
       // rejected pull once a second.
-      if (triggerFired && systemArmed && loggingMode != "CONTINUOUS") {
+      // ENDING a line is handled before the fix-quality gate, deliberately.
+      // The vertices are already on the card and closing captures no new
+      // position, so there is nothing a poor fix could corrupt. Refusing it
+      // would leave the operator pressing at a line that will not close, and
+      // the longer it stays open the more of the next job it swallows.
+      if (triggerFired && systemArmed && loggingMode == "LINE" && polygonActive) {
+        closePolygon("ended by operator", true);
+      }
+      else if (triggerFired && systemArmed && loggingMode != "CONTINUOUS") {
 
         // Nothing is recorded without a fix we trust.
         if (!gpsUsable()) {
@@ -3717,22 +4826,36 @@ void loop() {
           // One weed, one record. The lock releases on time OR on movement, so
           // working a big bush stays a single point while the next bush along
           // still logs the moment you get there.
-          unsigned long sinceLast = currentMillis - lastLogTime;
-          double movedM = hasLoggedPoint
+          // Measured in GNSS time, not millis(), for two reasons: millis()
+          // restarts at zero on every reset - so a rebooting unit handed out a
+          // free un-deduplicated point every time - and it drifts from real
+          // time whenever the loop stalls serving the dashboard.
+          //
+          // A saved point older than LASTPOINT_MAX_AGE_S is ignored, so
+          // yesterday's last plant cannot suppress this morning's first.
+          bool havePrev = hasLoggedPoint && lastPointEpoch > 0 &&
+                          live_epoch >= lastPointEpoch &&
+                          (live_epoch - lastPointEpoch) <= LASTPOINT_MAX_AGE_S;
+          unsigned long sinceS = havePrev ? (live_epoch - lastPointEpoch) : 0;
+          double movedM = havePrev
                         ? metresBetween(lastPointLat, lastPointLon, live_lat, live_lon)
                         : 1e9;
 
-          bool timeReleased = (sinceLast >= (unsigned long)(pointCooldownS * 1000.0));
+          bool timeReleased = (sinceS >= (unsigned long)pointCooldownS);
           bool moveReleased = (pointMinDistM > 0.0) && (movedM >= pointMinDistM);
 
-          if (!hasLoggedPoint || timeReleased || moveReleased) {
+          if (!havePrev || timeReleased || moveReleased) {
             lastLogTime = currentMillis;
             if (saveRecordLocally(currentWeed, live_lat, live_lon, live_epoch,
                                   currentControlType, live_accuracy_m,
                                   live_epoch, "POINT")) {
               lastPointLat   = live_lat;
               lastPointLon   = live_lon;
+              lastPointEpoch = live_epoch;
               hasLoggedPoint = true;
+              pointsLogged++;
+              trailAdd(live_lat, live_lon, 0);   // a point stands alone
+              saveLastPoint();
               lastAction = "Logged Point: " + currentWeed;
               Serial.println("Spot Spray Logged.");
             } else {
@@ -3740,7 +4863,8 @@ void loop() {
             }
           } else {
             // Tell the operator why nothing happened, or it reads as a fault.
-            unsigned long waitS = (unsigned long)pointCooldownS - (sinceLast / 1000);
+            unsigned long waitS = (unsigned long)pointCooldownS > sinceS
+                                ? (unsigned long)pointCooldownS - sinceS : 0;
             lastAction = "Same plant - already logged (" + String(waitS) + "s or " +
                          String(pointMinDistM - movedM, 1) + "m to go)";
             Serial.println("Trigger suppressed: same plant.");
@@ -3755,6 +4879,20 @@ void loop() {
           } else {
             Serial.println("Spraying inside polygon (timer reset).");
           }
+        }
+
+        // LINE is start-follow-end: the press that begins it is not the same
+        // kind of event as the press that ends it. A polygon can rely on the
+        // idle timeout because spraying is continuous; a bait trail stops to
+        // refill, so only a deliberate second press may end it.
+        else if (loggingMode == "LINE") {
+          // Only ever the START here - the end is handled above, outside the
+          // fix gate. Starting DOES need a fix, because the first vertex is a
+          // real position.
+          lastTriggerActivity = currentMillis;
+          startPolygonAt(live_lat, live_lon, live_epoch);
+          lastAction = "STARTED Line - press again to end";
+          Serial.println("--- NEW LINE STARTED ---");
         }
       }
     }

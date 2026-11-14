@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-MSA EcoSync - end of field day.
+FPE EcoSync - end of field day.
 
 Replaces the Runs.txt checklist. Works out for itself which jobs the day's
 records belong to, then runs the polygon build and the per-job statistics in
@@ -49,12 +49,43 @@ LOG_PATH = os.path.join(HERE, "end_of_day_log.txt")
 
 # ---------------------------------------------------------------------------
 
+KNOWN_FLAGS = ("--write", "--no-extent", "--no-track", "--no-stats",
+               "--yesterday", "--help", "-h")
+
+
 def resolve_day(args):
-    """A bare date argument wins; otherwise today, or yesterday on request."""
+    """A bare date argument wins; otherwise today, or yesterday on request.
+
+    Anything that is not a flag is taken as the date, so a stray word reached
+    day_window_ms() and came back as a strptime traceback. Check it here and
+    say so in words instead. Same for a mistyped flag, which would otherwise be
+    ignored in silence - which is worse, because the run looks like it worked.
+    """
     tz = ZoneInfo(ss.LOCAL_TZ)
+
     for a in args:
-        if not a.startswith("--"):
-            return a
+        if a.startswith("-"):
+            if a not in KNOWN_FLAGS:
+                print()
+                print("  Unknown option: %s" % a)
+                print("  Valid options : %s" % ", ".join(KNOWN_FLAGS[:5]))
+                print()
+                sys.exit(2)
+            continue
+        try:
+            datetime.strptime(a, "%Y-%m-%d")
+        except ValueError:
+            print()
+            print("  '%s' is not a date." % a)
+            print()
+            print("  Give a date as YYYY-MM-DD, or none at all for today:")
+            print("      end_of_day.bat                      today, dry run")
+            print("      end_of_day.bat --write              today, for real")
+            print("      end_of_day.bat 2026-10-20 --write   a given day")
+            print()
+            sys.exit(2)
+        return a
+
     now = datetime.now(tz)
     if "--yesterday" in args:
         now -= timedelta(days=1)
@@ -141,7 +172,7 @@ def main():
     day = resolve_day(args)
 
     print()
-    print("MSA EcoSync - end of day for %s (%s)" % (day, ss.LOCAL_TZ))
+    print("FPE EcoSync - end of day for %s (%s)" % (day, ss.LOCAL_TZ))
     print("Mode: %s" % ("WRITE - this will post polygons and update records"
                         if do_write else
                         "DRY RUN - nothing will be written. Add --write when happy."))

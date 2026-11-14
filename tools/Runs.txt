@@ -1,0 +1,11 @@
+track_to_polygons.bat Date
+track_to_polygons.bat Date --write
+
+** If has records from more than one job:
+     DEW NP Weed Control
+     Riverland Boxthorn Control
+
+   Run it once per job:
+
+     spray_stats.bat Date --job "DEW NP Weed Control" --setextent --write
+     spray_stats.bat Date --job "Riverland Boxthorn Control" --setextent --write

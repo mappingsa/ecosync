@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM  MSA EcoSync - compile and upload
+REM  FPE EcoSync - compile and upload
 REM
 REM  Close the Arduino Serial Monitor first. Windows gives a COM port to one
 REM  program at a time, and "Access is denied" always means something else has
@@ -25,7 +25,18 @@ REM that silently stops matching is exactly the kind of thing that wastes an
 REM evening. Pass a port on the command line to override.
 set "DEFAULTPORT=COM9"
 set "FQBN=esp32:esp32:esp32thing_plus_c"
-set "PORTFILE=%TEMP%\msa_ports.txt"
+REM A SEPARATE FQBN for the upload, so the compile above is provably untouched.
+REM UploadSpeed is a board menu option, not a compile setting - the binary is
+REM identical either way - but keeping them apart means a flashing problem can
+REM never be confused with a build difference.
+REM
+REM 115200 instead of the 921600 default. Auto-reset on this board is marginal
+REM once there is a switch and a flying lead hanging off EN, and a slower
+REM connection tolerates a sluggish reset line far better. It costs a few
+REM seconds per flash and it is the first thing to try when esptool reports
+REM "Wrong boot mode detected".
+set "FQBN_UPLOAD=esp32:esp32:esp32thing_plus_c:UploadSpeed=115200"
+set "PORTFILE=%TEMP%\fpe_ports.txt"
 
 if not exist "%SKETCH%\ecosync_field.ino" (
   echo [FATAL] Cannot find "%SKETCH%\ecosync_field.ino"
@@ -36,6 +47,7 @@ if not exist "%SKETCH%\ecosync_field.ino" (
 echo.
 echo   Sketch : firmware\ecosync_field
 echo   Board  : %FQBN%
+echo   Upload : %FQBN_UPLOAD%
 echo.
 echo   Close the Arduino Serial Monitor first if it is open.
 echo.
@@ -50,7 +62,7 @@ exit /b
 REM --------------------------------------------------------------------------
 :main
 echo ==========================================================
-echo  MSA EcoSync flash log
+echo  FPE EcoSync flash log
 echo  Date  : %DATE% %TIME%
 echo  Sketch: firmware\ecosync_field
 echo ==========================================================
@@ -124,7 +136,7 @@ for %%P in (%PORTS%) do (
     echo ==========================================================
     echo  UPLOAD ATTEMPT on %%P
     echo ==========================================================
-    arduino-cli upload --fqbn %FQBN% --port %%P --input-dir "%OUTDIR%"
+    arduino-cli upload --fqbn %FQBN_UPLOAD% --port %%P --input-dir "%OUTDIR%"
     if !ERRORLEVEL! EQU 0 (
       set "GOODPORT=%%P"
       echo   ^>^> %%P accepted the upload.

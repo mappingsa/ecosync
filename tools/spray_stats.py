@@ -28,6 +28,7 @@ and never in git. Copy spray_stats_config.example.json and fill it in.
 Only needs `requests`. No ArcGIS Python API, no conda environment.
 """
 
+import fnmatch
 import json
 import math
 import os
@@ -71,7 +72,7 @@ MIN_SPAN_DEG = 0.0025           # ~250 m, so a single point does not zoom to inf
 # Shape of the map image the report template asks for: ${$map| ... | size:600:400}.
 # The extent is grown to this shape so the renderer has nothing to crop. Change
 # it here if the template's size changes, or pass --mapsize 800x500.
-MAP_ASPECT = 600.0 / 400.0
+MAP_ASPECT = 600.0 / 280.0
 
 
 def load_config():
@@ -286,13 +287,27 @@ def find_survey_record(token, day_str, job=None):
 
     where = date_where(SURVEY_URL, token, "spray_date", t0, t1)
     jf = field_named(SURVEY_URL, token, "job_number")
+    feats = []
     if job and jf:
-        where += " AND %s = %s" % (jf, sql_str(job))
-
-    body = query(SURVEY_URL, token, {
-        "where": where,
-        "outFields": ",".join(want), "returnGeometry": "false"})
-    feats = body.get("features", [])
+        # Job numbers are typed by hand in Form 1, so match ignoring case and
+        # spaces at either end ("Riverland Boxthorn Control " still matches).
+        loose = " AND UPPER(TRIM(BOTH ' ' FROM %s)) = %s" % (
+            jf, sql_str(" ".join(str(job).split()).upper()))
+        try:
+            feats = query(SURVEY_URL, token, {
+                "where": where + loose,
+                "outFields": ",".join(want), "returnGeometry": "false"}).get("features", [])
+        except RuntimeError:
+            # Service refused TRIM/UPPER: pull the day's records and compare here.
+            day = query(SURVEY_URL, token, {
+                "where": where,
+                "outFields": ",".join(want), "returnGeometry": "false"}).get("features", [])
+            norm = lambda v: " ".join(str(v or "").split()).upper()
+            feats = [f for f in day if norm(attr(f["attributes"], "job_number")) == norm(job)]
+    else:
+        feats = query(SURVEY_URL, token, {
+            "where": where,
+            "outFields": ",".join(want), "returnGeometry": "false"}).get("features", [])
     if not feats:
         return None, None
     if len(feats) > 1:
@@ -467,6 +482,16 @@ def day_extent(token, t0, t1, job=None, focus=None):
         xmin = min(b["xmin"] for b in boxes); xmax = max(b["xmax"] for b in boxes)
         ymin = min(b["ymin"] for b in boxes); ymax = max(b["ymax"] for b in boxes)
 
+    return frame_extent(xmin, ymin, xmax, ymax)
+
+
+def frame_extent(xmin, ymin, xmax, ymax):
+    """Floor, pad and aspect-correct a raw bounding box into a map extent.
+
+    Split out of day_extent so the detail map below gets exactly the same
+    treatment. A second framing routine that drifted from this one would show
+    two maps of the same day that disagree about where the edges are.
+    """
     # A day spent on one plant gives a zero-width box, which would zoom to the
     # centre of nowhere. Floor the span before padding it.
     if xmax - xmin < MIN_SPAN_DEG:
@@ -483,8 +508,8 @@ def day_extent(token, t0, t1, job=None, focus=None):
 
     # Match the extent's shape to the map IMAGE's shape.
     #
-    # The report draws the map at 600x400 - landscape, 3:2. A day worked up and
-    # down a creek gives a tall, narrow bounding box. Hand the renderer a
+    # The report draws each map at 600x280 - landscape, about 15:7. A day
+    # worked up and down a creek gives a tall, narrow bounding box. Hand the renderer a
     # portrait extent for a landscape image and it fits one axis and crops the
     # other, which is how a correctly-calculated extent still put points off
     # the top and bottom of the picture.
@@ -508,6 +533,104 @@ def day_extent(token, t0, t1, job=None, focus=None):
             ymin, ymax = mid - need / 2.0, mid + need / 2.0
 
     return dict(xmin=xmin, ymin=ymin, xmax=xmax, ymax=ymax)
+
+
+# Percentiles walked when hunting for the dense core, and how much smaller than
+# the whole day a box has to be before it counts as one. 21 October 2026 is the
+# case this exists for: 60% of 916 records sat in a 120 x 60 m patch while the
+# rest ran along 43 km of roadside, so the one map that had to hold both showed
+# neither. No percentile fixes that - it needs a second picture.
+DETAIL_STEPS      = (90, 80, 70, 60, 50, 40)
+DETAIL_AREA_RATIO = 0.10        # core must be under a tenth of the day's area
+DETAIL_MIN_SHARE  = 0.25        # ...and still hold a quarter of the records
+DETAIL_FALLBACK   = 80          # compact day: just zoom in a little
+
+
+def _area_str(km2):
+    """Square kilometres reads as 0.00 for a patch you could walk across."""
+    return ("%.1f ha" % (km2 * 100.0)) if km2 < 0.1 else ("%.2f km2" % km2)
+
+
+def _box_km2(xs, ys, pct, lat_mid):
+    a, b = shortest_interval(xs, pct)
+    c, e = shortest_interval(ys, pct)
+    kx = 111.320 * math.cos(math.radians(lat_mid))
+    return ((b - a) * kx) * ((e - c) * 110.570), (a, c, b, e)
+
+
+def detail_extent(token, t0, t1, job=None):
+    """Frame on the day's dense core, for the report's second map.
+
+    A day worked in one patch and then along a road has two scales in it. The
+    overview map has to contain everything, which leaves the patch as a smudge.
+    This finds the tightest coverage level whose box is a small fraction of the
+    whole day's area and frames on that instead.
+
+    Returns (extent, note) or (None, reason). Never clips the overview - this
+    is an additional picture, not a replacement, so nothing is hidden from the
+    report by framing it tightly.
+    """
+    pts = record_positions(token, t0, t1, job)
+    if len(pts) < 20:
+        return None, "too few records to be worth a second map"
+
+    xs = sorted(p[0] for p in pts)
+    ys = sorted(p[1] for p in pts)
+    lat_mid = (ys[0] + ys[-1]) / 2.0
+
+    full_km2, _ = _box_km2(xs, ys, 100, lat_mid)
+    if full_km2 <= 0:
+        return None, "the day has no spread"
+
+    # Pick the DENSEST box, not the first one that happens to be small.
+    #
+    # Walking down and taking the first percentile under an area threshold
+    # stopped too early: on a patch-plus-road day the 70% box already looked
+    # "small" against 168 km2 while still being 13 km across. Records per km2
+    # says plainly which box is the concentration.
+    best = None
+    for pct in DETAIL_STEPS:
+        km2, (a, c, b, e) = _box_km2(xs, ys, pct, lat_mid)
+        if km2 <= 0:
+            continue
+        inside = sum(1 for (px, py) in pts if a <= px <= b and c <= py <= e)
+        if inside < len(pts) * DETAIL_MIN_SHARE:
+            continue              # framing on a handful of points is not a map
+        density = inside / km2
+        if best is None or density > best[0]:
+            best = (density, pct, km2, inside, (a, c, b, e))
+
+    if best and best[2] <= full_km2 * DETAIL_AREA_RATIO:
+        _, pct, km2, _, (a, c, b, e) = best
+        ext = frame_extent(a, c, b, e)
+        # Count against the FINAL frame. The raw interval is floored, padded and
+        # aspect-corrected on the way out, so it always ends up holding more
+        # than the percentile suggests - and the note should say what the
+        # reader will actually see on the page.
+        shown = sum(1 for (px, py) in pts
+                    if ext["xmin"] <= px <= ext["xmax"]
+                    and ext["ymin"] <= py <= ext["ymax"])
+        note = ("the day's densest patch - %d of %d records, %s of the "
+                "%s the overview has to cover"
+                % (shown, len(pts), _area_str(km2), _area_str(full_km2)))
+        return ext, note
+
+    # Nothing stands out, so the day was worked in one area. Zoom in modestly
+    # rather than repeating the overview - two identical maps on a page look
+    # like a mistake, and a tighter frame is still more readable.
+    km2, (a, c, b, e) = _box_km2(xs, ys, DETAIL_FALLBACK, lat_mid)
+    if km2 > full_km2 * 0.5:
+        # Work strung evenly along a road has no core. A "detail" map of 80% of
+        # a 30 km strip is the overview again, and two near-identical pictures
+        # on a page are worse than one.
+        return None, "the work is spread evenly - there is nothing to zoom into"
+    ext = frame_extent(a, c, b, e)
+    shown = sum(1 for (px, py) in pts
+                if ext["xmin"] <= px <= ext["xmax"]
+                and ext["ymin"] <= py <= ext["ymax"])
+    note = ("no separate cluster - framed on the main working area (%d of %d "
+            "records)" % (shown, len(pts)))
+    return ext, note
 
 
 def portal_get(path, token, **params):
@@ -602,6 +725,36 @@ def day_job_numbers(token, t0, t1):
     return sorted(jobs)
 
 
+def match_map(maps, job):
+    """Find a job's web map, allowing shell-style patterns as keys.
+
+    Exact keys win. Then any pattern that matches, longest first, so a specific
+    rule beats a general one and the answer never depends on dict order:
+
+        "EPLB-*"            -> the EP Landscape Board map
+        "EPLB-C489.*"       -> an override for one works order
+        "default"           -> everything else
+
+    Patterns exist so a new works order does not need a new config line. The
+    alternative - remembering to add one - is the failure that produced a
+    report framed on another job's ground.
+
+    Returns (item_id, why) or (None, None).
+    """
+    if not maps or not job:
+        return None, None
+    if job in maps:
+        return maps[job], "job %r" % job
+    hits = [k for k in maps
+            if k != "default"
+            and any(ch in k for ch in "*?[")
+            and fnmatch.fnmatchcase(job, k)]
+    if hits:
+        best = max(hits, key=len)
+        return maps[best], "pattern %r matching job %r" % (best, job)
+    return None, None
+
+
 def choose_webmap(cfg, token, t0, t1, explicit, day_str, job=None):
     """Pick the web map from the day's job number.
 
@@ -626,8 +779,10 @@ def choose_webmap(cfg, token, t0, t1, explicit, day_str, job=None):
     if not maps:
         return WEBMAP_ITEM_ID, "the built-in default (no \"webmaps\" in your config)"
 
-    if len(jobs) == 1 and jobs[0] in maps:
-        return maps[jobs[0]], "job %r" % jobs[0]
+    if len(jobs) == 1:
+        hit, why = match_map(maps, jobs[0])
+        if hit:
+            return hit, why
 
     if len(jobs) > 1:
         print("\n  ** %s has records from more than one job:" % day_str)
@@ -647,10 +802,35 @@ def choose_webmap(cfg, token, t0, t1, explicit, day_str, job=None):
     if jobs:
         print("\n  ** Job %r is not in the \"webmaps\" block of your config, so I "
               "cannot tell which web map this day belongs to." % jobs[0])
-        print("     Add it, or pass --webmap <itemid>. **")
+        print("     Add it, or a pattern that covers it such as \"%s-*\", or"
+              % jobs[0].split()[0].split("-")[0])
+        print("     pass --webmap <itemid>. **")
         sys.exit(1)
 
     return maps.get("default", WEBMAP_ITEM_ID), "the configured default"
+
+
+def choose_detail_webmap(cfg, explicit, job=None):
+    """The second, zoomed-in map - optional, and silent when not configured.
+
+    Mirrors the "webmaps" block, so a project that wants a detail map adds one:
+
+        "detail_webmaps": {
+          "Works Order C489.5": "<item id of the cloned web map>",
+          "default":            "<item id>"
+        }
+
+    Returns None when there is no detail map for this job, and the report
+    simply has one map as before. Unlike choose_webmap this never exits - a
+    missing detail map is a choice, not a mistake.
+    """
+    if explicit:
+        return explicit
+    maps = cfg.get("detail_webmaps") or {}
+    if not maps:
+        return None
+    hit, _ = match_map(maps, job)
+    return hit or maps.get("default")
 
 
 def check_webmap(token, t0, t1, day_str, job=None):
@@ -741,15 +921,21 @@ def check_webmap(token, t0, t1, day_str, job=None):
         print("  Web map check: every layer will draw this day's records.")
 
 
-def set_webmap_extent(token, ext, day_str, apply_it, t0=None, t1=None):
-    """Point the report's web map at the day's data.
+def set_webmap_extent(token, ext, day_str, apply_it, t0=None, t1=None,
+                      item_id=None, label=""):
+    """Point a report web map at the day's data.
+
+    item_id defaults to the overview map. The detail map passes its own, which
+    is the only reason this takes one at all - everything else about the two is
+    identical, including the backup.
 
     Nothing is changed unless apply_it is true, and the current web map JSON is
     written to a backup file first either way. This edits a live item - the
     backup is the undo.
     """
-    item = portal_get("content/items/%s" % WEBMAP_ITEM_ID, token)
-    data = portal_get("content/items/%s/data" % WEBMAP_ITEM_ID, token)
+    item_id = item_id or WEBMAP_ITEM_ID
+    item = portal_get("content/items/%s" % item_id, token)
+    data = portal_get("content/items/%s/data" % item_id, token)
     owner = item.get("owner")
 
     # Backups live in their own folder. One per run adds up, and a tools folder
@@ -757,11 +943,12 @@ def set_webmap_extent(token, ext, day_str, apply_it, t0=None, t1=None):
     backup_dir = os.path.join(HERE, "webmap_backups")
     os.makedirs(backup_dir, exist_ok=True)
     backup = os.path.join(backup_dir, "webmap_backup_%s_%s.json"
-                          % (WEBMAP_ITEM_ID, datetime.now().strftime("%Y%m%d-%H%M%S")))
+                          % (item_id, datetime.now().strftime("%Y%m%d-%H%M%S")))
     with open(backup, "w") as f:
         json.dump({"item": item, "data": data}, f, indent=2)
 
-    print("\n  Web map: %s (owner %s)" % (item.get("title"), owner))
+    print("\n  Web map%s: %s (owner %s)"
+          % ((" [%s]" % label) if label else "", item.get("title"), owner))
     print("  Backup written: webmap_backups/%s" % os.path.basename(backup))
 
     old = item.get("extent")
@@ -829,7 +1016,7 @@ def set_webmap_extent(token, ext, day_str, apply_it, t0=None, t1=None):
         payload["text"] = json.dumps(data)
 
     r = requests.post(
-        "%s/sharing/rest/content/users/%s/items/%s/update" % (PORTAL, owner, WEBMAP_ITEM_ID),
+        "%s/sharing/rest/content/users/%s/items/%s/update" % (PORTAL, owner, item_id),
         data=payload, timeout=60)
     r.raise_for_status()
     body = r.json()
@@ -968,6 +1155,16 @@ def main():
             sys.exit(1)
         explicit_webmap = args[k + 1]
         del args[k:k + 2]
+    explicit_detail = None
+    if "--detailmap" in args:
+        k = args.index("--detailmap")
+        if k + 1 >= len(args):
+            print("--detailmap needs a web map item id after it.")
+            sys.exit(1)
+        explicit_detail = args[k + 1]
+        del args[k:k + 2]
+    no_detail = "--nodetail" in args
+
     global WEBMAP_ITEM_ID
     if explicit_webmap:
         WEBMAP_ITEM_ID = explicit_webmap
@@ -992,9 +1189,13 @@ def main():
     print("\nMSA EcoSync - positional data quality for %s (%s)\n" % (day_str, LOCAL_TZ))
 
     WEBMAP_ITEM_ID, why = choose_webmap(cfg, token, t0, t1, explicit_webmap, day_str, job)
+    detail_id = None if no_detail else choose_detail_webmap(cfg, explicit_detail, job)
     if job:
         print("  Job:     %s  (everything below is scoped to this job)" % job)
-    print("  Web map: %s  (chosen from %s)\n" % (WEBMAP_ITEM_ID, why))
+    print("  Web map: %s  (chosen from %s)" % (WEBMAP_ITEM_ID, why))
+    if detail_id:
+        print("  Detail map: %s" % detail_id)
+    print()
 
     pts = layer_stats(POINTS_URL, token, t0, t1, job)
     pol = layer_stats(POLYS_URL, token, t0, t1, job)
@@ -1050,7 +1251,24 @@ def main():
         if ext is None:
             print("\n  No geometry found for that date - extent unchanged.")
         else:
-            set_webmap_extent(token, ext, day_str, do_extent, t0, t1)
+            set_webmap_extent(token, ext, day_str, do_extent, t0, t1,
+                              label="overview" if detail_id else "")
+
+            # The second map, framed on whatever the overview had to flatten.
+            if detail_id and not no_detail:
+                dext, note = detail_extent(token, t0, t1, job)
+                if dext is None:
+                    # Still point it at the day. Leaving it alone would publish
+                    # a report whose second map shows whatever day was run last
+                    # - wrong, and completely silent about it.
+                    print("\n  No separate detail view (%s)." % note)
+                    print("  Setting the detail map to the overview extent so it "
+                          "cannot show a stale day.")
+                    dext = ext
+                else:
+                    print("\n  Detail map framed on %s." % note)
+                set_webmap_extent(token, dext, day_str, do_extent, t0, t1,
+                                  item_id=detail_id, label="detail")
 
     if not do_write:
         print("\n  Accuracy figures are print-only. Add --write to put them into "

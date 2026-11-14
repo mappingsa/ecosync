@@ -93,3 +93,16 @@ rejected.csv
 
 # Editor and tool backups.
 *.bak
+
+# ---------- Added November 2026 ----------
+# pending.csv and pending_poly.csv were named individually, which missed the
+# track queue and - once LINE mode arrived - the line queue too. Match the
+# family instead, so the next queue added is covered before it exists.
+pending_*.csv
+
+# Serial captures from monitor.bat. They are evidence while a fault is open and
+# noise forever after, and a long session is megabytes.
+tools/serial_logs/
+
+# Stray serial dumps saved by hand into the repo root.
+Trigger pin*.txt

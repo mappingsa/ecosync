@@ -1,6 +1,6 @@
 @echo off
 REM ==========================================================================
-REM  MSA EcoSync - compile
+REM  FPE EcoSync - compile
 REM
 REM  Double-click this file. Output goes to build_log.txt in the repo root.
 REM
@@ -46,7 +46,7 @@ exit /b
 REM --------------------------------------------------------------------------
 :main
 echo ==========================================================
-echo  MSA EcoSync build log
+echo  FPE EcoSync build log
 echo  Date  : %DATE% %TIME%
 echo  Sketch: firmware\ecosync_field
 echo  Board : %FQBN%

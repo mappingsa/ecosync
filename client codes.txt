@@ -1,0 +1,8 @@
+client codes
+EPELB Eyre Peninsula East Landscape Board
+EPWLB Eyre Peninsula West Landscape Board
+RMLB Riverland and Murraylands Landscape Board
+AWLB  Alinytjara Wiluṟara Landscape Board
+DEWNP Department of Environment and Water National Parks
+DEWAM Department of Environment and Water Asset Management
+SAAL SA Arid Lands Landscape Board
