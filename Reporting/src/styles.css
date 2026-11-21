@@ -1,0 +1,96 @@
+:root {
+  font-family: system-ui, "Segoe UI", sans-serif;
+  color: #1d2a24;
+  background: #f6f7f5;
+}
+body { margin: 0; }
+main { max-width: 1100px; margin: 0 auto; padding: 16px 24px 48px; }
+header { display: flex; justify-content: space-between; align-items: baseline; }
+h1 { font-size: 22px; margin: 8px 0 16px; }
+h2 { font-size: 16px; margin: 28px 0 8px; }
+.who { color: #5b6660; font-size: 14px; }
+.signin { text-align: center; padding-top: 15vh; }
+button {
+  font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid #2f6b4f;
+  background: #2f6b4f; color: #fff; cursor: pointer;
+}
+button:disabled { opacity: 0.6; cursor: default; }
+button.link { background: none; border: none; color: #2f6b4f; padding: 0; text-decoration: underline; }
+.controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 12px; }
+input, select { font: inherit; padding: 4px 6px; }
+.error { color: #a1261b; background: #fbeae8; padding: 8px 12px; border-radius: 6px; }
+.warn { color: #7a5500; background: #fdf4dc; padding: 8px 12px; border-radius: 6px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 12px 0; }
+.card { background: #fff; border: 1px solid #dfe3df; border-radius: 8px; padding: 10px 12px; }
+.card .value { font-size: 20px; font-weight: 600; }
+.card .label { font-size: 12px; color: #5b6660; }
+.map { height: 460px; border-radius: 8px; overflow: hidden; border: 1px solid #dfe3df; }
+table { border-collapse: collapse; width: 100%; background: #fff; font-size: 14px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #e7eae7; }
+thead th { background: #eef1ee; }
+table.sheet th { width: 220px; color: #5b6660; font-weight: 500; }
+.swatch { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; border: 1px solid #0003; }
+.jobpanel { display: flex; gap: 24px; align-items: center; background: #fff; border: 1px solid #dfe3df; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+.jobpanel .logo { max-height: 56px; max-width: 220px; }
+.jobpanel dl { display: grid; grid-template-columns: 120px 1fr; gap: 2px 12px; margin: 0; font-size: 14px; }
+.jobpanel dt { color: #5b6660; }
+.jobpanel dd { margin: 0; }
+
+.jobsheet fieldset { border: 1px solid #dfe3df; border-radius: 8px; background: #fff; margin: 0 0 12px; padding: 10px 14px 14px; }
+.jobsheet legend { font-weight: 600; padding: 0 6px; }
+.jobsheet label { display: block; margin: 8px 0; }
+.jobsheet input[type=number], .jobsheet input[type=time], .jobsheet select { margin-left: 6px; }
+.jobsheet textarea { width: 100%; box-sizing: border-box; font: inherit; padding: 6px; margin-top: 4px; }
+.grid2 { display: flex; gap: 24px; flex-wrap: wrap; }
+.checklist { margin: 10px 0; }
+.cl-title { font-size: 13px; color: #5b6660; margin-bottom: 4px; }
+.checklist label.check { display: inline-flex; gap: 6px; align-items: center; margin: 2px 14px 2px 0; }
+table.weather { width: auto; }
+table.weather input, table.weather select { width: 90px; margin: 0; }
+table.weather td.calc { font-weight: 600; }
+ul.warn { margin: 8px 0 0; padding: 8px 12px 8px 28px; }
+.thumbs { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.thumbs figure { margin: 0; width: 160px; font-size: 12px; }
+.thumbs img { width: 160px; height: 120px; object-fit: cover; border-radius: 6px; border: 1px solid #dfe3df; }
+.thumbs figure.pending img { opacity: 0.7; }
+.sigpad canvas { width: 100%; max-width: 600px; height: auto; aspect-ratio: 600 / 180; border: 1px dashed #9aa59f; border-radius: 6px; background: #fff; touch-action: none; }
+.sigrow { display: flex; justify-content: space-between; max-width: 600px; font-size: 13px; }
+img.sig { max-width: 300px; display: block; margin-bottom: 6px; }
+.hint { color: #5b6660; font-size: 13px; }
+.saverow { display: flex; gap: 12px; align-items: center; }
+.ok { color: #2f6b4f; font-weight: 600; }
+.setup { background: #fff; border: 1px solid #dfe3df; border-radius: 8px; padding: 12px 16px; }
+details.form1 { margin-top: 20px; }
+details.form1 summary { cursor: pointer; color: #5b6660; margin-bottom: 8px; }
+button.secondary { background: #fff; color: #2f6b4f; }
+.issued { margin-top: 10px; font-size: 14px; }
+.letterhead { display: flex; gap: 12px; flex-wrap: wrap; }
+.jobsheet label.lh { display: flex; align-items: center; gap: 10px; border: 2px solid #dfe3df; border-radius: 8px; padding: 8px 12px; cursor: pointer; margin: 0; }
+.jobsheet label.lh.on { border-color: #2f6b4f; background: #f1f7f3; }
+.jobsheet label.lh img { height: 40px; max-width: 120px; object-fit: contain; }
+
+/* Phones: one column, bigger touch targets, nothing wider than the screen. */
+@media (max-width: 640px) {
+  main { padding: 10px 12px 40px; }
+  h1 { font-size: 18px; }
+  header { flex-wrap: wrap; gap: 4px; }
+  .controls { gap: 10px; }
+  .controls label, .controls select, .controls input { width: 100%; box-sizing: border-box; }
+  .controls button { width: 100%; padding: 10px; }
+  .cards { grid-template-columns: repeat(2, 1fr); }
+  .map { height: 300px; }
+  .jobpanel { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .jobpanel dl { grid-template-columns: 100px 1fr; }
+  table { font-size: 13px; }
+  th, td { padding: 5px 6px; }
+  .jobsheet fieldset { padding: 8px 10px 12px; }
+  .jobsheet input, .jobsheet select, .jobsheet textarea { font-size: 16px; } /* stops iPhone zooming in */
+  .checklist label.check { display: flex; margin: 6px 0; }
+  .checklist input[type=checkbox], .letterhead input[type=radio] { width: 22px; height: 22px; }
+  table.weather input, table.weather select { width: 72px; }
+  .letterhead { flex-direction: column; }
+  .thumbs figure, .thumbs img { width: 46vw; }
+  .thumbs img { height: 34vw; }
+  .saverow { flex-direction: column; align-items: stretch; }
+  .saverow button { padding: 12px; font-size: 16px; }
+}

@@ -1,0 +1,5 @@
+﻿job_number,client_code,entity,report_type,report_title,property_address,owner_contact,default_equipment,default_chemicals,targets,active,notes,aliases,logo
+DEW-NP,DEW,MSA,Spray record,DEW National Parks weed control,,,,,Gazania; Noogoora Burr; Golden Dodder,Yes,,DEW NP Weed Control,
+EP-C489.2,EP,MSA,Spray record,Buffel Grass control,Iron Knob Rd,,Backpack Sprayer,Glyphosate 450; Brushwet/Consume; Pine oil,Buffel Grass,Yes,,,
+EP-C489.5,EP,MSA,Spray record,African Boxthorn control,,,Cut and swab,,African Boxthorn; Boneseed,Yes,Used the Boxthorn report template,Works Order C489.5,
+AW-2628,AW,MSA,Spray record,Buffel Grass control,,,,,Buffel Grass,Yes,,AW-LW; AW Landscape,
