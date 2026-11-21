@@ -7,9 +7,9 @@ REM  program at a time, and "Access is denied" always means something else has
 REM  it open.
 REM
 REM  Usage:
-REM      flash.bat            - try COM9 first (this board's usual port), then
+REM      flash.bat            - try COM3 first (this board's usual port), then
 REM                             anything else attached
-REM      flash.bat COM3       - go straight to that port and try nothing else
+REM      flash.bat COM9       - go straight to that port and try nothing else
 REM ==========================================================================
 
 setlocal enabledelayedexpansion
@@ -19,11 +19,12 @@ set "SKETCH=%ROOT%\firmware\ecosync_field"
 set "LOG=%ROOT%\flash_log.txt"
 set "OUTDIR=%ROOT%\build_out"
 set "FORCEPORT=%~1"
-REM This board has been enumerating as COM9. Tried first, but never the only
+REM This board enumerated as COM9 on the laptop and COM3 on the desktop - a
+REM different USB lead is enough to change it. Tried first, but never the only
 REM one tried - Windows reassigns COM numbers on a whim, and a hard-coded port
 REM that silently stops matching is exactly the kind of thing that wastes an
 REM evening. Pass a port on the command line to override.
-set "DEFAULTPORT=COM9"
+set "DEFAULTPORT=COM3"
 set "FQBN=esp32:esp32:esp32thing_plus_c"
 REM A SEPARATE FQBN for the upload, so the compile above is provably untouched.
 REM UploadSpeed is a board menu option, not a compile setting - the binary is
@@ -101,11 +102,11 @@ if "!PORTS!"=="" (
   type "%PORTFILE%"
   echo.
   echo Falling back to trying COM1 through COM12.
-  set "PORTS=COM1 COM2 COM3 COM4 COM5 COM6 COM7 COM8 COM10 COM11 COM12"
+  set "PORTS=COM1 COM2 COM4 COM5 COM6 COM7 COM8 COM9 COM10 COM11 COM12"
 )
 
 REM Put the usual port at the FRONT of the queue rather than replacing it. If
-REM the board is on COM9 the first attempt wins and nothing else is tried; if
+REM the board is on COM3 the first attempt wins and nothing else is tried; if
 REM Windows has moved it, every other candidate still gets its turn.
 if not "%DEFAULTPORT%"=="" (
   set "PORTS=%DEFAULTPORT% !PORTS!"

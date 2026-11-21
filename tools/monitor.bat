@@ -6,9 +6,9 @@ REM  The Arduino IDE cannot save its Serial Monitor, so a bench test that
 REM  matters has to be copied out by hand - and the interesting part is always
 REM  the bit that scrolled past.
 REM
-REM      monitor.bat              COM9, default
-REM      monitor.bat COM3         another port
-REM      monitor.bat COM9 pad     names the log pad_<stamp>.txt
+REM      monitor.bat              COM3, default
+REM      monitor.bat COM9         another port
+REM      monitor.bat COM3 pad     names the log pad_<stamp>.txt
 REM
 REM  Logs land in tools\serial_logs\. Ctrl-C stops it.
 REM
@@ -20,7 +20,10 @@ setlocal
 cd /d "%~dp0"
 
 set "PORT=%~1"
-if "%PORT%"=="" set "PORT=COM9"
+REM Was COM9. The board enumerated as COM3 on the desktop with the other
+REM cable (20 Nov) - a different USB lead is enough to change the number.
+REM Always overridable: monitor.bat COM9
+if "%PORT%"=="" set "PORT=COM3"
 
 set "TAG=%~2"
 if "%TAG%"=="" set "TAG=serial"
