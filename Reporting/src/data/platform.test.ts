@@ -175,3 +175,41 @@ test("attachments: signed links, upload, delete", async () => {
   assert.ok(calls.some((c) => c.method === "DELETE" && c.url.searchParams.get("id") === "in.(a1)"));
   assert.equal(s.attachmentUrl("d1", "a1"), "");
 });
+
+test("editing: role, create, update and delete go to the right tables", async () => {
+  const calls = fakeServer((c) => {
+    const t = c.url.pathname.split("/").pop();
+    if (t === "members") return [{ org_id: "org1", role: "editor" }];
+    if (t === "treatment_areas" && c.method === "POST") return [{ id: "new1" }];
+    if (t === "treatment_points" && c.method === "PATCH") return [{ id: "p1" }];
+    if (t === "report_areas") return [{ id: "new1", Job_Number: "EP-C489.5", geometry: { type: "Polygon", coordinates: [] } }];
+    return [];
+  });
+  const s = src();
+  assert.equal(await s.myRole(), "editor");
+  const id = await s.createFeature("polygons", { geom: "SRID=4326;MULTIPOLYGON(((0 0,1 0,1 1,0 0)))", treated_at: "2026-11-22T00:00:00.000Z", job_id: "jA" });
+  assert.equal(id, "new1");
+  const post = calls.find((c) => c.method === "POST")!;
+  assert.equal(post.url.pathname, "/rest/v1/treatment_areas");
+  assert.equal(post.body.source, "app");
+  assert.equal(post.body.org_id, "org1");
+  assert.equal(post.body.capture_mode, "drawn");
+
+  await s.updateFeature("points", "p1", { species_id: "sb" });
+  const patch = calls.find((c) => c.method === "PATCH")!;
+  assert.equal(patch.url.pathname, "/rest/v1/treatment_points");
+  assert.equal(patch.url.searchParams.get("id"), "eq.p1");
+  assert.deepEqual(patch.body, { species_id: "sb" });
+
+  await s.deleteFeature("points", "p1");
+  const del = calls.filter((c) => c.method === "PATCH")[1];
+  assert.ok(typeof del.body.deleted_at === "string");
+
+  const f = await s.featureById("polygons", "new1");
+  assert.equal(f?.properties.Job_Number, "EP-C489.5");
+  assert.equal("geometry" in (f?.properties ?? {}), false);
+
+  // a viewer's save comes back empty: say so
+  fakeServer(() => []);
+  await assert.rejects(src().updateFeature("points", "p1", { notes: "x" }), /Not saved/);
+});

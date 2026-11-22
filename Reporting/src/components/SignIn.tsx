@@ -1,6 +1,19 @@
-import { useState, type FormEvent } from "react";
+import { useState, type FormEvent, type ReactNode } from "react";
 import { platformSignIn, sendPasswordReset, setNewPassword } from "../data/platformAuth";
 import type { Session } from "../data/types";
+import { Logo } from "../ui/Icon";
+
+function Shell({ children }: { children: ReactNode }) {
+  return (
+    <main className="signin">
+      <div className="signin-card">
+        <div className="signin-brand"><Logo size={40} /><div><b>EcoSync</b><span>Field data and spray reporting</span></div></div>
+        {children}
+      </div>
+      <p className="signin-foot">Data held in Australia (Sydney)</p>
+    </main>
+  );
+}
 
 interface Props {
   onArcGIS: () => void;
@@ -41,21 +54,19 @@ export function SignIn({ onArcGIS, onPlatform, error }: Props) {
   }
 
   return (
-    <main className="signin">
-      <h1>EcoSync Reporting</h1>
+    <Shell>
       {error && <p className="error">{error}</p>}
-      <button onClick={onArcGIS}>Sign in with ArcGIS</button>
-
       <form className="platform-signin" onSubmit={submit}>
-        <h2>EcoSync database (trial)</h2>
         <label>Email <input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
         <label>Password <input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
-        <button type="submit" disabled={busy}>{busy ? "Signing in…" : "Sign in"}</button>{" "}
-        <button type="button" className="link" onClick={forgot}>Forgot password?</button>
+        <button type="submit" className="primary wide" disabled={busy}>{busy ? <><span className="spinner" />Signing in…</> : "Sign in"}</button>
+        <button type="button" className="link forgot" onClick={forgot}>Forgot password?</button>
         {err && <p className="error">{err}</p>}
         {msg && <p className="ok">{msg}</p>}
       </form>
-    </main>
+      <div className="or"><span>or</span></div>
+      <button className="ghost wide" onClick={onArcGIS}>Sign in with ArcGIS</button>
+    </Shell>
   );
 }
 
@@ -77,15 +88,14 @@ export function NewPassword({ onDone }: { onDone: (s: Session) => void }) {
   }
 
   return (
-    <main className="signin">
-      <h1>EcoSync Reporting</h1>
+    <Shell>
       <form className="platform-signin" onSubmit={submit}>
         <h2>Choose a new password</h2>
         <label>New password <input type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} required /></label>
         <label>Again <input type="password" autoComplete="new-password" value={again} onChange={(e) => setAgain(e.target.value)} required /></label>
-        <button type="submit">Save password</button>
+        <button type="submit" className="primary wide">Save password</button>
         {err && <p className="error">{err}</p>}
       </form>
-    </main>
+    </Shell>
   );
 }

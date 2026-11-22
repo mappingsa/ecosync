@@ -151,7 +151,7 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, lo
           The job sheet is saved to a new hosted table, <b>EcoSync Daily Records</b>, in your ArcGIS content
           (one row per job per day, with photos and signature as attachments). It only needs creating once.
         </p>
-        <button onClick={setup} disabled={!!busy}>{busy || "Create the Daily Records table"}</button>
+        <button className="primary" onClick={setup} disabled={!!busy}>{busy || "Create the Daily Records table"}</button>
         {error && <p className="error">{error}</p>}
       </div>
     );
@@ -395,7 +395,7 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, lo
 
       {error && <p className="error">{error}</p>}
       <div className="saverow">
-        <button type="submit" disabled={!!busy}>{busy || "Save job sheet"}</button>
+        <button type="submit" className="primary" disabled={!!busy}>{busy || "Save job sheet"}</button>
         {onIssue && (
           <button type="button" className="secondary" disabled={!!busy} onClick={issue}>
             {pdfs.length ? "Re-issue report (PDF)" : "Issue report (PDF)"}

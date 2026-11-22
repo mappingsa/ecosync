@@ -11,6 +11,9 @@ import { DayMap } from "./components/DayMap";
 import { JobSheet } from "./components/JobSheet";
 import { issueReport } from "./components/issueReport";
 import { NewPassword, SignIn } from "./components/SignIn";
+import { Workspace } from "./workspace/Workspace";
+import { TopBar } from "./ui/TopBar";
+import { useTheme } from "./ui/theme";
 
 const BACKEND_KEY = "ecosync.backend"; // the data source chosen last on this device
 const BACKEND_NAME: Record<Backend, string> = { arcgis: "ArcGIS", platform: "EcoSync database" };
@@ -35,6 +38,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [lookups, setLookups] = useState<Lookups | null>(null);
   const [needPassword, setNeedPassword] = useState(false);
+  const [tab, setTab] = useState<"report" | "map">("report");
+  const [theme, toggleTheme] = useTheme();
   const backend: Backend = session?.backend ?? "arcgis";
   // One data source per sign-in, so it can remember table locations between screens.
   const source = useMemo<DataSource | null>(() => {
@@ -142,22 +147,32 @@ export default function App() {
     setDay(null);
   };
 
+  const mapTab = tab === "map" && source instanceof PlatformSource;
+
   return (
-    <main>
-      <header>
-        <h1>EcoSync Reporting</h1>
-        <span className="who">
-          <span className={`backend ${backend}`}>{BACKEND_NAME[backend]}</span>{" "}
-          {session.username} ·{" "}
-          <button className="link" onClick={signOutNow}>Sign out</button>
-        </span>
-      </header>
+    <div className="app">
+      <TopBar
+        tab={mapTab ? "map" : "report"}
+        onTab={source instanceof PlatformSource ? setTab : null}
+        theme={theme}
+        onTheme={toggleTheme}
+        backend={backend}
+        user={session.username}
+        onSignOut={signOutNow}
+      />
+
+      {mapTab ? <Workspace source={source} lookups={lookups} /> : <main className="page"><div className="page-inner">
+
+      <div className="page-head">
+        <h1>Spray report</h1>
+        <p className="muted">Pick a day and a job, check the map and job sheet, then issue the PDF.</p>
+      </div>
 
       <section className="controls">
         <label>
           Day <input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
         </label>
-        <button onClick={load} disabled={busy}>{busy ? "Loading…" : "Load day"}</button>
+        <button className="primary" onClick={load} disabled={busy}>{busy ? <><span className="spinner" />Loading…</> : "Load day"}</button>
         {day && (
           <label>
             Job{" "}
@@ -275,7 +290,8 @@ export default function App() {
           </details>}
         </>
       )}
-    </main>
+      </div></main>}
+    </div>
   );
 }
 

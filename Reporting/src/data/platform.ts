@@ -11,7 +11,32 @@ import { joinList, splitList, toRecord, type DailyRecord } from "./dailySchema";
 
 export class PlatformError extends Error {}
 
-const VIEWS = { points: "report_points", lines: "report_lines", polygons: "report_areas" } as const;
+const VIEWS = { points: "report_points", lines: "report_lines", polygons: "report_areas", tracks: "report_tracks" } as const;
+
+/** The layers the map workspace can show. */
+export type WorkspaceLayer = keyof typeof VIEWS;
+/** The layers that can be drawn and edited (tracks come from the unit only). */
+export type EditableLayer = "points" | "lines" | "polygons";
+const TABLES: Record<EditableLayer, string> = { points: "treatment_points", lines: "treatment_lines", polygons: "treatment_areas" };
+
+export type Role = "owner" | "editor" | "viewer";
+
+/** The pick lists for the edit form, with ids. */
+export interface Domains {
+  jobs: { id: string; job_number: string; active: boolean }[];
+  species: { id: string; name: string; default_method_id: string | null; active: boolean }[];
+  methods: { id: string; name: string; active: boolean }[];
+}
+
+/** What the edit form changes. Leave a key out to keep it. */
+export interface FeatureValues {
+  job_id?: string | null;
+  species_id?: string | null;
+  method_id?: string | null;
+  treated_at?: string; // ISO
+  notes?: string | null;
+  geom?: string; // EWKT
+}
 const PAGE = 1000; // the most Supabase returns per request
 const SIGN_SECONDS = 6 * 3600; // file links stay valid this long
 const SIGNATURE = /^signature.*\.png$/i; // same rules as issueReport.ts
@@ -97,7 +122,6 @@ export function buildTargets(species: any[], methods: any[], overrides: any[]): 
 }
 
 export class PlatformSource implements DataSource {
-  private orgP: Promise<string> | null = null;
   private jobsP: Promise<JobRef[]> | null = null;
   private urls = new Map<string, string>(); // attachment id -> signed link
 
@@ -144,15 +168,26 @@ export class PlatformSource implements DataSource {
     }
   }
 
-  private org(): Promise<string> {
-    this.orgP ??= this.rest("members", { select: "org_id", user_id: `eq.${this.userId}` }).then((rows: any[]) => {
+  private memberP: Promise<{ org_id: string; role: Role }> | null = null;
+
+  private member(): Promise<{ org_id: string; role: Role }> {
+    this.memberP ??= this.rest("members", { select: "org_id,role", user_id: `eq.${this.userId}` }).then((rows: any[]) => {
       if (!rows.length) {
         throw new PlatformError("Your account isn't in an organisation yet. Ask the owner to invite your email (see 007_reporting_app.sql).");
       }
-      return rows[0].org_id as string;
+      return rows[0];
     });
-    this.orgP.catch(() => (this.orgP = null));
-    return this.orgP;
+    this.memberP.catch(() => (this.memberP = null));
+    return this.memberP;
+  }
+
+  private org(): Promise<string> {
+    return this.member().then((m) => m.org_id);
+  }
+
+  /** owner / editor / viewer in this organisation. */
+  async myRole(): Promise<Role> {
+    return (await this.member()).role;
   }
 
   private jobs(): Promise<JobRef[]> {
@@ -205,6 +240,11 @@ export class PlatformSource implements DataSource {
   }
 
   async dayFeatures(layer: "points" | "polygons" | "lines", t0: number, t1: number): Promise<Feature[]> {
+    return this.rangeFeatures(layer, t0, t1);
+  }
+
+  /** Every record on a layer with a time in [t0, t1) - any length of time, tracks included. */
+  async rangeFeatures(layer: WorkspaceLayer, t0: number, t1: number): Promise<Feature[]> {
     const rows = await this.all(VIEWS[layer], {
       select: "*",
       and: `(treated_at.gte.${new Date(t0).toISOString()},treated_at.lt.${new Date(t1).toISOString()})`,
@@ -215,6 +255,47 @@ export class PlatformSource implements DataSource {
       geometry: (geometry ?? null) as Geometry | null,
       properties: properties as Attributes,
     }));
+  }
+
+  // --- editing ------------------------------------------------------------
+
+  async domains(): Promise<Domains> {
+    const [jobs, species, methods] = await Promise.all([
+      this.all("jobs", { select: "id,job_number,active", order: "job_number" }),
+      this.all("species", { select: "id,name,default_method_id,active", order: "name" }),
+      this.all("control_methods", { select: "id,name,active", order: "name" }),
+    ]);
+    return { jobs, species, methods };
+  }
+
+  /** One record as the map shows it (after a save), or null if it's gone. */
+  async featureById(layer: EditableLayer, id: string): Promise<Feature | null> {
+    const rows = await this.rest(VIEWS[layer], { select: "*", id: `eq.${id}` });
+    if (!rows.length) return null;
+    const { geometry, ...properties } = rows[0];
+    return { type: "Feature", geometry: geometry ?? null, properties };
+  }
+
+  /** A record drawn in the workspace. Returns its id. */
+  async createFeature(layer: EditableLayer, v: FeatureValues & { geom: string; treated_at: string }): Promise<string> {
+    const rows = await this.rest(TABLES[layer], { select: "id" }, {
+      method: "POST",
+      prefer: "return=representation",
+      body: { ...v, org_id: await this.org(), source: "app", capture_mode: "drawn" },
+    });
+    if (!rows?.length) throw new PlatformError("Not saved: your role may not allow adding records.");
+    return rows[0].id;
+  }
+
+  /** Change a record. From then on the ArcGIS import leaves it alone (009_editing.sql). */
+  async updateFeature(layer: EditableLayer, id: string, v: FeatureValues): Promise<void> {
+    const rows = await this.rest(TABLES[layer], { id: `eq.${id}`, select: "id" }, { method: "PATCH", body: v, prefer: "return=representation" });
+    if (!rows?.length) throw new PlatformError("Not saved: the record wasn't found or your role doesn't allow editing.");
+  }
+
+  /** Hides a record (kept in the database, so the import can't bring it back). */
+  async deleteFeature(layer: EditableLayer, id: string): Promise<void> {
+    await this.updateFeature(layer, id, { deleted_at: new Date().toISOString() } as FeatureValues);
   }
 
   /** Form 1 stays in Survey123: no Form 1 records here. */
