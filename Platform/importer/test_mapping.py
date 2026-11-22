@@ -66,3 +66,31 @@ class Tracks(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Daily(unittest.TestCase):
+    def test_row(self):
+        from mapping import daily_row
+        r = daily_row({"JOB_NUMBER": "EP-C489.5", "record_date": "2026-11-18", "start_time": "07:30",
+                       "operators": "Jayme Peltz; Calvin ;", "tank_total_l": "400", "start_delta_t": "",
+                       "entity": "fpe", "status": "Issued", "observations": ""})
+        self.assertEqual(r["record_date"], "2026-11-18")
+        self.assertEqual(r["operators"], ["Jayme Peltz", "Calvin"])
+        self.assertEqual(r["equipment"], [])
+        self.assertEqual(r["tank_total_l"], 400.0)
+        self.assertIsNone(r["start_delta_t"])
+        self.assertIsNone(r["observations"])
+        self.assertEqual((r["letterhead"], r["status"]), ("FPE", "issued"))
+
+    def test_bad_date_and_defaults(self):
+        from mapping import daily_row
+        self.assertIsNone(daily_row({"record_date": "18/11/2026"}))
+        r = daily_row({"record_date": "2026-11-18", "entity": "", "status": ""})
+        self.assertEqual((r["letterhead"], r["status"]), (None, "draft"))
+
+    def test_kinds_and_names(self):
+        from mapping import attachment_kind, safe_name
+        self.assertEqual(attachment_kind("signature.png"), "signature")
+        self.assertEqual(attachment_kind("Spray Record EP-C489.5 2026-11-18 v2.pdf"), "report")
+        self.assertEqual(attachment_kind("photo_1.jpg"), "photo")
+        self.assertEqual(safe_name("Spray Record EP-C489.5 2026-11-18 v2.pdf"), "Spray_Record_EP-C489.5_2026-11-18_v2.pdf")

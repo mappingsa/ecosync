@@ -94,3 +94,17 @@ button.secondary { background: #fff; color: #2f6b4f; }
   .saverow { flex-direction: column; align-items: stretch; }
   .saverow button { padding: 12px; font-size: 16px; }
 }
+.lookuprow { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0; }
+table.weather input.calc { background: #f1f7f3; }
+table.weather input.typed { background: #fff8e6; }
+.dtnote { font-size: 11px; color: #5b6660; }
+@media (max-width: 640px) { .lookuprow { flex-direction: column; } .lookuprow button { padding: 10px; } }
+
+/* Sign-in choice and which data source is in use */
+.platform-signin { display: flex; flex-direction: column; gap: 0.5rem; max-width: 22rem; margin: 2rem auto 0; text-align: left; padding-top: 1rem; border-top: 1px solid #ddd; }
+.platform-signin h2 { margin: 0; font-size: 1.05rem; }
+.platform-signin label { display: flex; flex-direction: column; font-size: 0.9rem; gap: 0.2rem; }
+.platform-signin input { font-size: 1rem; padding: 0.45rem; }
+.ok { color: #2f6b1f; }
+.backend { font-size: 0.75rem; padding: 0.1rem 0.45rem; border-radius: 0.6rem; background: #e8eef4; color: #01385c; }
+.backend.platform { background: #e7f1df; color: #2f5a18; }

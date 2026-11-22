@@ -6,6 +6,11 @@ Data Platform (Supabase).
   python import_arcgis.py --full     everything (first run / history)
   python import_arcgis.py --dry-run  read and match, write nothing
 
+Daily Records (job sheets) are always copied in full - there are only a few
+hundred - with their photos, signatures and issued PDFs. Files already copied
+are not downloaded again. A job sheet first saved in the new platform (not
+ArcGIS) is never overwritten.
+
 Safe to run as often as you like: every record is keyed by its ArcGIS
 GlobalID, so re-running updates rather than duplicates. ArcGIS stays the
 source of truth during the parallel run - edit there, not in the platform.
@@ -25,7 +30,8 @@ from datetime import datetime, timezone
 
 import requests
 
-from mapping import attr, build_index, esri_to_ewkt, match, track_runs
+from mapping import (attachment_kind, attr, build_index, daily_row, esri_to_ewkt, match,
+                     safe_name, track_runs)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ARCGIS_CONFIG = os.path.normpath(os.path.join(HERE, "..", "..", "tools", "spray_stats_config.json"))
@@ -40,6 +46,10 @@ LAYERS = {
     "polygons": ("%s/MSA_Weed_Spray_Polygons/FeatureServer/0" % SERVICES, "treatment_areas"),
 }
 TRACK_URL = "%s/MSA_Weed_Spray_Track/FeatureServer/0" % SERVICES
+PORTAL = "https://www.arcgis.com"
+DAILY_TITLE = "EcoSync Daily Records"
+DAILY_SOURCE = "arcgis:EcoSync_Daily_Records"
+BUCKET = "attachments"
 BATCH = 500
 
 
@@ -141,6 +151,7 @@ def fetch_all(url, token, where):
 class Supabase:
     def __init__(self, url, key, dry_run=False):
         self.rest = url.rstrip("/") + "/rest/v1/"
+        self.storage = url.rstrip("/") + "/storage/v1"
         self.h = {"apikey": key, "Content-Type": "application/json"}
         if not key.startswith("sb_"):
             # Legacy service_role keys are JWTs and also go in Authorization.
@@ -149,20 +160,61 @@ class Supabase:
         self.dry_run = dry_run
 
     def get(self, table, params):
-        r = requests.get(self.rest + table, headers=self.h, params=params, timeout=60)
-        if r.status_code >= 400:
-            raise RuntimeError("Supabase %s: %s" % (table, r.text[:300]))
-        return r.json()
+        """All matching rows (Supabase hands back at most 1000 per request)."""
+        out = []
+        while True:
+            p = dict(params, limit="1000", offset=str(len(out)))
+            r = requests.get(self.rest + table, headers=self.h, params=p, timeout=60)
+            if r.status_code >= 400:
+                raise RuntimeError("Supabase %s: %s" % (table, r.text[:300]))
+            page = r.json()
+            out.extend(page)
+            if len(page) < 1000:
+                return out
 
-    def upsert(self, table, rows, conflict):
+    def upsert(self, table, rows, conflict, returning=None):
+        """Insert or update. With returning="id,..." the saved rows come back."""
         if self.dry_run or not rows:
-            return
-        h = dict(self.h, Prefer="resolution=merge-duplicates,return=minimal")
+            return []
+        prefer = "resolution=merge-duplicates," + ("return=representation" if returning else "return=minimal")
+        h = dict(self.h, Prefer=prefer)
+        params = {"on_conflict": conflict}
+        if returning:
+            params["select"] = returning
+        out = []
         for i in range(0, len(rows), BATCH):
-            r = requests.post(self.rest + table, headers=h, params={"on_conflict": conflict},
+            r = requests.post(self.rest + table, headers=h, params=params,
                               data=json.dumps(rows[i:i + BATCH]), timeout=120)
             if r.status_code >= 400:
                 raise RuntimeError("Supabase %s: %s" % (table, r.text[:300]))
+            if returning:
+                out.extend(r.json())
+        return out
+
+    def delete(self, table, params):
+        if self.dry_run:
+            return
+        r = requests.delete(self.rest + table, headers=self.h, params=params, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError("Supabase %s: %s" % (table, r.text[:300]))
+
+    # File storage (the private 'attachments' bucket)
+    def put_file(self, path, data, content_type):
+        if self.dry_run:
+            return
+        h = {k: v for k, v in self.h.items() if k != "Content-Type"}
+        h.update({"Content-Type": content_type or "application/octet-stream", "x-upsert": "true"})
+        r = requests.post("%s/object/%s/%s" % (self.storage, BUCKET, path), headers=h, data=data, timeout=180)
+        if r.status_code >= 400:
+            raise RuntimeError("Supabase storage %s: %s" % (path, r.text[:300]))
+
+    def remove_files(self, paths):
+        if self.dry_run or not paths:
+            return
+        r = requests.delete("%s/object/%s" % (self.storage, BUCKET), headers=self.h,
+                            data=json.dumps({"prefixes": list(paths)}), timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError("Supabase storage delete: %s" % r.text[:300])
 
 
 def iso(ms):
@@ -174,6 +226,119 @@ def num(v):
         return float(v) if v not in (None, "") else None
     except (TypeError, ValueError):
         return None
+
+
+# --- Daily Records ----------------------------------------------------------------
+
+def find_daily_table(token):
+    body = arc_post(PORTAL + "/sharing/rest/search", token, {
+        "q": 'title:"%s" AND type:"Feature Service"' % DAILY_TITLE, "num": "20"})
+    for item in body.get("results", []):
+        if str(item.get("title", "")).strip().lower() == DAILY_TITLE.lower() and item.get("url"):
+            return item["url"].rstrip("/") + "/0"
+    return None
+
+
+def arc_attachments(url, token, oids):
+    """{objectid: [attachment info]} - one call if the layer allows it, else per record."""
+    out = {o: [] for o in oids}
+    if not oids:
+        return out
+    try:
+        for i in range(0, len(oids), 100):
+            body = arc_post(url + "/queryAttachments", token, {
+                "objectIds": ",".join(str(o) for o in oids[i:i + 100])})
+            for g in body.get("attachmentGroups", []):
+                out[g["parentObjectId"]] = g.get("attachmentInfos", [])
+    except RuntimeError:
+        for o in oids:
+            out[o] = arc_post("%s/%d/attachments" % (url, o), token, {}).get("attachmentInfos", [])
+    return out
+
+
+def import_daily(sb, org, token, job_ix, note):
+    """Copy every job sheet, then any photo / signature / PDF not copied yet.
+    Returns (records, files copied, files removed, skipped)."""
+    url = find_daily_table(token)
+    if not url:
+        log("  Daily Records: no '%s' table found in ArcGIS - skipped" % DAILY_TITLE)
+        return 0, 0, 0, 0
+    feats = fetch_all(url, token, "1=1")
+
+    # Sheets first saved in the new platform are left alone.
+    keep = {(r["job_id"], r["record_date"]) for r in sb.get("daily_records", {
+        "org_id": "eq." + org, "source": "neq." + DAILY_SOURCE, "select": "job_id,record_date"})}
+
+    newest = {}   # (job_id, date) -> (objectid, row); the app reads the newest of any duplicates
+    skipped = 0
+    for f in feats:
+        a = f.get("attributes") or {}
+        oid = attr(a, "OBJECTID")
+        row = daily_row(a)
+        job_raw = attr(a, "job_number")
+        job_id = match(job_raw, job_ix)
+        if job_id is None:
+            note(DAILY_SOURCE, "job_number", job_raw)
+        if row is None or job_id is None or oid is None:
+            skipped += 1
+            continue
+        k = (job_id, row["record_date"])
+        if k in keep:
+            continue
+        if k not in newest or oid > newest[k][0]:
+            row.update({"org_id": org, "job_id": job_id, "source": DAILY_SOURCE,
+                        "source_ref": str(attr(a, "GlobalID") or oid)})
+            newest[k] = (int(oid), row)
+
+    saved = sb.upsert("daily_records", [r for _, r in newest.values()], "org_id,job_id,record_date",
+                      returning="id,job_id,record_date")
+    rec_id = {(r["job_id"], r["record_date"]): r["id"] for r in saved}
+
+    oid_to_key = {oid: k for k, (oid, _) in newest.items()}
+    infos = arc_attachments(url, token, sorted(oid_to_key))
+
+    have = {}   # source_ref -> storage_path, for files already copied
+    for r in sb.get("attachments", {"org_id": "eq." + org, "source_ref": "not.is.null",
+                                    "select": "source_ref,storage_path"}):
+        have[r["source_ref"]] = r["storage_path"]
+
+    copied, wanted = 0, set()
+    for oid, atts in infos.items():
+        rid = rec_id.get(oid_to_key[oid])
+        for att in atts:
+            ref = "%s:%d:%d" % (DAILY_SOURCE, oid, att["id"])
+            wanted.add(ref)
+            if ref in have or (rid is None and not sb.dry_run):
+                continue
+            if sb.dry_run:
+                copied += 1
+                continue
+            try:
+                r = requests.get("%s/%d/attachments/%d" % (url, oid, att["id"]),
+                                 params={"token": token}, timeout=180)
+                r.raise_for_status()
+                path = "%s/%s/%d_%s" % (org, rid, att["id"], safe_name(att.get("name")))
+                sb.put_file(path, r.content, att.get("contentType"))
+                sb.upsert("attachments", [{
+                    "org_id": org, "daily_record_id": rid, "kind": attachment_kind(att.get("name")),
+                    "storage_path": path, "name": att.get("name") or "file",
+                    "content_type": att.get("contentType"), "size_bytes": att.get("size") or len(r.content),
+                    "source_ref": ref}], "org_id,storage_path")
+                copied += 1
+            except (requests.RequestException, RuntimeError) as e:
+                # try again next run; one bad file shouldn't stop the rest
+                log("  could not copy %s (sheet %d): %s" % (att.get("name"), oid, e))
+
+    # Files deleted in ArcGIS (e.g. a photo removed from a sheet) go here too -
+    # only for sheets that came from ArcGIS and that were read this run.
+    copied_sheets = {"%s:%d:" % (DAILY_SOURCE, o) for o in oid_to_key}
+    gone = [(ref, path) for ref, path in have.items()
+            if ref not in wanted and any(ref.startswith(p) for p in copied_sheets)]
+    if gone:
+        sb.remove_files([p for _, p in gone])
+        for ref, _ in gone:
+            sb.delete("attachments", {"org_id": "eq." + org, "source_ref": "eq." + ref})
+    return len(newest), copied, len(gone), skipped
 
 
 # --- Import -----------------------------------------------------------------------
@@ -257,6 +422,8 @@ def main():
     sb.upsert("tracks", track_rows, "org_id,source,source_ref")
     totals["track runs"] = (len(track_rows), len(feats))
 
+    sheets, files, removed, sheet_skips = import_daily(sb, org, token, job_ix, note)
+
     now = datetime.now(timezone.utc).isoformat()
     sb.upsert("needs_a_home", [
         {"org_id": org, "source": s, "field": fld, "value": v, "seen": n, "last_seen": now}
@@ -265,6 +432,9 @@ def main():
     window = "everything" if args.full else "last %d days" % args.days
     summary = ", ".join("%s %d" % (k, v[0]) for k, v in totals.items())
     log("%s%s: %s" % ("DRY RUN " if args.dry_run else "", window, summary))
+    log("  job sheets %d, files copied %d%s%s" % (
+        sheets, files, ", files removed %d" % removed if removed else "",
+        ", sheets skipped (bad date or unknown job) %d" % sheet_skips if sheet_skips else ""))
     if any(v[1] for k, v in totals.items() if k != "track runs"):
         log("  skipped (no geometry or time): " + ", ".join("%s %d" % (k, v[1]) for k, v in totals.items() if k != "track runs" and v[1]))
     if unmatched:

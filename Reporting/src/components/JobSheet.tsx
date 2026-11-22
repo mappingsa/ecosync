@@ -4,6 +4,8 @@ import type { AttachmentInfo, Attributes, DataSource, Job } from "../data/types"
 import { joinList, splitList, type DailyRecord } from "../data/dailySchema";
 import { prefill } from "../report/prefill";
 import { deltaT, weatherWarnings } from "../report/weather";
+import { dayWindow } from "../report/stats";
+import { lookupWeather } from "./weatherLookup";
 import { SignaturePad } from "./SignaturePad";
 import { jpgName, shrinkImage } from "./images";
 import { PDF, SIGNATURE, type IssueOptions } from "./issueReport";
@@ -16,11 +18,13 @@ interface Props {
   jobRow: Job | null;
   lists: Map<string, string[]>;
   form1: Attributes | null;
+  /** Where the day's work was ([lon, lat]), for the weather lookup. */
+  location: [number, number] | null;
   /** Builds the PDF for a saved record and attaches it; provided by the report screen. */
   onIssue?: (rec: DailyRecord, progress: (msg: string) => void, options: IssueOptions) => Promise<{ blob: Blob; name: string; version: number }>;
 }
 
-export function JobSheet({ source, username, job, date, jobRow, lists, form1, onIssue }: Props) {
+export function JobSheet({ source, username, job, date, jobRow, lists, form1, location, onIssue }: Props) {
   const [ready, setReady] = useState<boolean | null>(null); // null = checking
   const [rec, setRec] = useState<DailyRecord | null>(null);
   const [atts, setAtts] = useState<AttachmentInfo[]>([]);
@@ -30,6 +34,12 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, on
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState("");
   const [printWarnings, setPrintWarnings] = useState(false);
+  // Delta T typed in by hand (true) or calculated from temperature and humidity (false).
+  const [dtManual, setDtManual] = useState({ start: false, end: false });
+  // Readings that came from the lookup (so a new time may replace them) vs typed by hand.
+  const [fromLookup, setFromLookup] = useState({ start: false, end: false });
+  const [lookedUpFor, setLookedUpFor] = useState({ start: "", end: "" });
+  const [weatherMsg, setWeatherMsg] = useState("");
 
   const load = async () => {
     setError(null);
@@ -42,7 +52,21 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, on
       if (!ok) return;
       const existing = await source.dailyRecord(job, date);
       if (existing && !existing.entity) existing.entity = (jobRow?.entity ?? "").trim().toUpperCase();
-      setRec(existing ?? prefill(job, date, CONFIG.timeZone, form1, jobRow));
+      const r = existing ?? prefill(job, date, CONFIG.timeZone, form1, jobRow);
+      setRec(r);
+      // A saved Delta T that differs from the calculation was typed in: keep it.
+      const differs = (saved: number | null, t: number | null, h: number | null) =>
+        saved != null && deltaT(t, h) != null && Math.abs(saved - deltaT(t, h)!) > 0.05;
+      setDtManual({
+        start: differs(r.start_delta_t, r.start_temp_c, r.start_rh_pct) || (r.start_delta_t != null && deltaT(r.start_temp_c, r.start_rh_pct) == null),
+        end: differs(r.end_delta_t, r.end_temp_c, r.end_rh_pct) || (r.end_delta_t != null && deltaT(r.end_temp_c, r.end_rh_pct) == null),
+      });
+      const empty = (t: number | null, h: number | null, w: number | null) => t == null && h == null && w == null;
+      setFromLookup({
+        start: empty(r.start_temp_c, r.start_rh_pct, r.start_wind_kmh) || /lookup/i.test(r.weather_source),
+        end: empty(r.end_temp_c, r.end_rh_pct, r.end_wind_kmh) || /lookup/i.test(r.weather_source),
+      });
+      setLookedUpFor({ start: r.start_time, end: r.end_time }); // loading a sheet never triggers a lookup
       setAtts(existing?.objectId != null ? await source.attachments(existing.objectId) : []);
     } catch (e: any) {
       setError(e.message ?? String(e));
@@ -63,15 +87,61 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, on
     }
   };
 
-  const startDT = rec ? deltaT(rec.start_temp_c, rec.start_rh_pct) : null;
-  const endDT = rec ? deltaT(rec.end_temp_c, rec.end_rh_pct) : null;
+  const startDT = rec ? (dtManual.start ? rec.start_delta_t : deltaT(rec.start_temp_c, rec.start_rh_pct)) : null;
+  const endDT = rec ? (dtManual.end ? rec.end_delta_t : deltaT(rec.end_temp_c, rec.end_rh_pct)) : null;
   const warnings = useMemo(() => {
     if (!rec) return [];
     return [
-      ...weatherWarnings("Start", { temp: rec.start_temp_c, rh: rec.start_rh_pct, wind: rec.start_wind_kmh }, CONFIG.sprayLimits),
-      ...weatherWarnings("Finish", { temp: rec.end_temp_c, rh: rec.end_rh_pct, wind: rec.end_wind_kmh }, CONFIG.sprayLimits),
+      ...weatherWarnings("Start", { temp: rec.start_temp_c, rh: rec.start_rh_pct, wind: rec.start_wind_kmh, dt: startDT }, CONFIG.sprayLimits),
+      ...weatherWarnings("Finish", { temp: rec.end_temp_c, rh: rec.end_rh_pct, wind: rec.end_wind_kmh, dt: endDT }, CONFIG.sprayLimits),
     ];
-  }, [rec]);
+  }, [rec, startDT, endDT]);
+
+  /** Fill start or finish readings from the weather lookup for that time. */
+  const lookup = async (side: "start" | "end", time: string) => {
+    if (!rec || !/^\d{2}:\d{2}$/.test(time)) return;
+    if (!location) {
+      setWeatherMsg("No mapped records for this job today, so there is no location for the weather lookup.");
+      return;
+    }
+    const [h, m] = time.split(":").map(Number);
+    const unix = (dayWindow(date, CONFIG.timeZone)[0] + (h * 60 + m) * 60_000) / 1000;
+    setWeatherMsg(`Looking up the weather at ${time}…`);
+    try {
+      const w = await lookupWeather(location[1], location[0], unix);
+      setRec((cur) => cur && {
+        ...cur,
+        [`${side}_temp_c`]: w.temp_c,
+        [`${side}_rh_pct`]: w.rh_pct,
+        [`${side}_wind_kmh`]: w.wind_kmh,
+        [`${side}_wind_dir`]: w.wind_dir,
+        weather_source: !cur.weather_source || /lookup|form 1/i.test(cur.weather_source)
+          ? "Weather lookup (OpenWeather) - check against meter"
+          : cur.weather_source,
+      });
+      setDtManual((d) => ({ ...d, [side]: false }));
+      setFromLookup((f) => ({ ...f, [side]: true }));
+      setLookedUpFor((l) => ({ ...l, [side]: time }));
+      setSaved("");
+      setWeatherMsg(`${side === "start" ? "Start" : "Finish"} weather filled in for ${time}. Edit any value if your meter read differently.`);
+    } catch (e: any) {
+      setWeatherMsg(e.message ?? String(e));
+    }
+  };
+
+  // Setting a start or finish time fills that side's weather - unless the
+  // readings there were typed in by hand. A short pause lets the time picker settle.
+  useEffect(() => {
+    if (!rec) return;
+    const timers: number[] = [];
+    for (const side of ["start", "end"] as const) {
+      const t = side === "start" ? rec.start_time : rec.end_time;
+      if (/^\d{2}:\d{2}$/.test(t) && t !== lookedUpFor[side] && fromLookup[side]) {
+        timers.push(window.setTimeout(() => lookup(side, t), 900));
+      }
+    }
+    return () => timers.forEach(clearTimeout);
+  }, [rec?.start_time, rec?.end_time]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (ready === null) return <p className="hint">Checking for the Daily Records table…</p>;
   if (!ready) {
@@ -94,6 +164,16 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, on
   };
   const numIn = (k: keyof DailyRecord) => (e: React.ChangeEvent<HTMLInputElement>) =>
     set(k, (e.target.value === "" ? null : Number(e.target.value)) as any);
+  /** A reading typed by hand: the lookup will no longer overwrite that side. */
+  const reading = (side: "start" | "end", k: keyof DailyRecord) => (e: React.ChangeEvent<HTMLInputElement>) => {
+    setFromLookup((f) => ({ ...f, [side]: false }));
+    numIn(k)(e);
+  };
+  const typedDT = (side: "start" | "end") => (e: React.ChangeEvent<HTMLInputElement>) => {
+    const v = e.target.value === "" ? null : Number(e.target.value);
+    setDtManual((d) => ({ ...d, [side]: v != null }));
+    set(side === "start" ? "start_delta_t" : "end_delta_t", v);
+  };
 
   /** Saves the sheet (and any new photos / signature); returns the saved record. */
   const persist = async (status: string): Promise<DailyRecord> => {
@@ -217,30 +297,51 @@ export function JobSheet({ source, username, job, date, jobRow, lists, form1, on
           <thead><tr><th /><th>At start</th><th>At finish</th></tr></thead>
           <tbody>
             <tr><th>Air temperature (°C)</th>
-              <td><input type="number" step="0.1" value={rec.start_temp_c ?? ""} onChange={numIn("start_temp_c")} /></td>
-              <td><input type="number" step="0.1" value={rec.end_temp_c ?? ""} onChange={numIn("end_temp_c")} /></td></tr>
+              <td><input type="number" step="0.1" value={rec.start_temp_c ?? ""} onChange={reading("start", "start_temp_c")} /></td>
+              <td><input type="number" step="0.1" value={rec.end_temp_c ?? ""} onChange={reading("end", "end_temp_c")} /></td></tr>
             <tr><th>Relative humidity (%)</th>
-              <td><input type="number" step="1" min="0" max="100" value={rec.start_rh_pct ?? ""} onChange={numIn("start_rh_pct")} /></td>
-              <td><input type="number" step="1" min="0" max="100" value={rec.end_rh_pct ?? ""} onChange={numIn("end_rh_pct")} /></td></tr>
+              <td><input type="number" step="1" min="0" max="100" value={rec.start_rh_pct ?? ""} onChange={reading("start", "start_rh_pct")} /></td>
+              <td><input type="number" step="1" min="0" max="100" value={rec.end_rh_pct ?? ""} onChange={reading("end", "end_rh_pct")} /></td></tr>
             <tr><th>Wind speed (km/h)</th>
-              <td><input type="number" step="0.1" min="0" value={rec.start_wind_kmh ?? ""} onChange={numIn("start_wind_kmh")} /></td>
-              <td><input type="number" step="0.1" min="0" value={rec.end_wind_kmh ?? ""} onChange={numIn("end_wind_kmh")} /></td></tr>
+              <td><input type="number" step="0.1" min="0" value={rec.start_wind_kmh ?? ""} onChange={reading("start", "start_wind_kmh")} /></td>
+              <td><input type="number" step="0.1" min="0" value={rec.end_wind_kmh ?? ""} onChange={reading("end", "end_wind_kmh")} /></td></tr>
             <tr><th>Wind direction</th>
-              <td><WindDir value={rec.start_wind_dir} onChange={(v) => set("start_wind_dir", v)} /></td>
-              <td><WindDir value={rec.end_wind_dir} onChange={(v) => set("end_wind_dir", v)} /></td></tr>
-            <tr><th>Delta T (calculated)</th><td className="calc">{startDT ?? "–"}</td><td className="calc">{endDT ?? "–"}</td></tr>
+              <td><WindDir value={rec.start_wind_dir} onChange={(v) => { setFromLookup((f) => ({ ...f, start: false })); set("start_wind_dir", v); }} /></td>
+              <td><WindDir value={rec.end_wind_dir} onChange={(v) => { setFromLookup((f) => ({ ...f, end: false })); set("end_wind_dir", v); }} /></td></tr>
+            <tr><th>Delta T</th>
+              {(["start", "end"] as const).map((side) => (
+                <td key={side}>
+                  <input type="number" step="0.1" className={dtManual[side] ? "typed" : "calc"}
+                    value={(side === "start" ? startDT : endDT) ?? ""} onChange={typedDT(side)} />
+                  <div className="dtnote">
+                    {dtManual[side]
+                      ? <button type="button" className="link" onClick={() => setDtManual((d) => ({ ...d, [side]: false }))}>use calculated</button>
+                      : "calculated"}
+                  </div>
+                </td>
+              ))}</tr>
           </tbody>
         </table>
+        <div className="lookuprow">
+          <button type="button" className="secondary" disabled={!rec.start_time} onClick={() => lookup("start", rec.start_time)}>
+            Look up start weather{rec.start_time ? ` (${rec.start_time})` : ""}
+          </button>
+          <button type="button" className="secondary" disabled={!rec.end_time} onClick={() => lookup("end", rec.end_time)}>
+            Look up finish weather{rec.end_time ? ` (${rec.end_time})` : ""}
+          </button>
+        </div>
+        {weatherMsg && <p className="hint">{weatherMsg}</p>}
         <label>
           Source of readings
           <select value={rec.weather_source} onChange={(e) => set("weather_source", e.target.value)}>
-            {!["", "Handheld meter", "Weather lookup", "Handheld meter and weather lookup"].includes(rec.weather_source) && (
+            {!["", "Handheld meter", "Weather lookup", "Handheld meter and weather lookup", "Weather lookup (OpenWeather) - check against meter"].includes(rec.weather_source) && (
               <option value={rec.weather_source}>{rec.weather_source}</option>
             )}
             <option value="">–</option>
             <option>Handheld meter</option>
             <option>Weather lookup</option>
             <option>Handheld meter and weather lookup</option>
+            <option>Weather lookup (OpenWeather) - check against meter</option>
           </select>
         </label>
         {warnings.length > 0 && (

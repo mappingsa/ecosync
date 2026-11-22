@@ -8,8 +8,8 @@ echo Building the site...
 call npm run build
 if errorlevel 1 goto failed
 echo.
-echo Done. Upload everything inside the "dist" folder to Cloudflare Pages
-echo (project: ecosync-reporting).
+echo Done. In Cloudflare: ecosync-reporting, Create deployment,
+echo click "folder" and choose this dist folder, then Deploy site.
 start "" "%~dp0dist"
 start "" https://dash.cloudflare.com/?to=/:account/pages
 pause

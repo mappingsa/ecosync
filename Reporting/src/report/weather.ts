@@ -28,11 +28,12 @@ export interface Limits {
 /** Warnings for one set of readings. Empty = within limits (or nothing entered). */
 export function weatherWarnings(
   when: string,
-  r: { temp: number | null; rh: number | null; wind: number | null },
+  r: { temp: number | null; rh: number | null; wind: number | null; dt?: number | null },
   limits: Limits,
 ): string[] {
   const out: string[] = [];
-  const dt = deltaT(r.temp, r.rh);
+  // An entered Delta T (e.g. read off a meter) wins over the calculated one.
+  const dt = r.dt != null && Number.isFinite(r.dt) ? r.dt : deltaT(r.temp, r.rh);
   if (dt != null) {
     if (dt > limits.deltaTStop) out.push(`${when}: Delta T ${dt} is above ${limits.deltaTStop} - conditions where spraying should not go ahead.`);
     else if (dt > limits.deltaTHigh) out.push(`${when}: Delta T ${dt} is above the ${limits.deltaTLow}–${limits.deltaTHigh} working window.`);
@@ -43,4 +44,12 @@ export function weatherWarnings(
     else if (r.wind < limits.windMinKmh) out.push(`${when}: wind ${r.wind} km/h is below ${limits.windMinKmh} km/h - possible inversion.`);
   }
   return out;
+}
+
+const POINTS = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"];
+
+/** Wind direction in degrees -> 16-point compass ("WNW"). */
+export function compass(deg: number | null | undefined): string {
+  if (deg == null || !Number.isFinite(deg)) return "";
+  return POINTS.at(Math.round((((deg % 360) + 360) % 360) / 22.5) % 16)!;
 }

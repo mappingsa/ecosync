@@ -10,6 +10,14 @@ export const CONFIG = {
   // Not a secret: it only identifies the app to the ArcGIS sign-in page.
   clientId: "Z5hdM6y1xmyKp2Wp",
 
+  // EcoSync Data Platform (Supabase, Sydney). The publishable key is meant to
+  // be public - row-level security decides what each signed-in person sees.
+  // NEVER put the secret / service_role key here.
+  platform: {
+    url: "https://ochrxvsglrsbzrbuzpvx.supabase.co",
+    publishableKey: "sb_publishable_jJUG7Ru--3EC27Uive5zeg_YFaN3Yqt",
+  },
+
   timeZone: "Australia/Adelaide",
   accuracyThresholdM: 3,
 

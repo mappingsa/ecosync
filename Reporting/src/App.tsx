@@ -2,12 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { CONFIG } from "./config";
 import { currentSession, signIn, signOut } from "./data/auth";
 import { ArcGISSource } from "./data/arcgis";
-import type { Attributes, Feature, Job, Lookups, Session } from "./data/types";
-import { accuracy, attr, canonicalJob, dayWindow, forJob, jobsIn, normJob, sameJob, summarise } from "./report/stats";
+import { PlatformSource } from "./data/platform";
+import { platformSession, platformSignOut, platformToken, platformUserId, takeRecoveryLink } from "./data/platformAuth";
+import type { Attributes, Backend, DataSource, Feature, Job, Lookups, Session } from "./data/types";
+import { accuracy, attr, bounds, canonicalJob, dayWindow, forJob, jobsIn, normJob, sameJob, summarise } from "./report/stats";
 import { colourKey, colourMap } from "./report/colours";
 import { DayMap } from "./components/DayMap";
 import { JobSheet } from "./components/JobSheet";
 import { issueReport } from "./components/issueReport";
+import { NewPassword, SignIn } from "./components/SignIn";
+
+const BACKEND_KEY = "ecosync.backend"; // the data source chosen last on this device
+const BACKEND_NAME: Record<Backend, string> = { arcgis: "ArcGIS", platform: "EcoSync database" };
 
 interface Day {
   date: string;
@@ -28,12 +34,36 @@ export default function App() {
   const [job, setJob] = useState("");
   const [busy, setBusy] = useState(false);
   const [lookups, setLookups] = useState<Lookups | null>(null);
+  const [needPassword, setNeedPassword] = useState(false);
+  const backend: Backend = session?.backend ?? "arcgis";
   // One data source per sign-in, so it can remember table locations between screens.
-  const source = useMemo(() => (session ? new ArcGISSource(session.token) : null), [session]);
+  const source = useMemo<DataSource | null>(() => {
+    if (!session) return null;
+    return session.backend === "platform" ? new PlatformSource(platformToken, platformUserId()) : new ArcGISSource(session.token);
+  }, [session]);
 
   useEffect(() => {
-    currentSession().then(setSession, (e) => setError(String(e.message ?? e)));
+    if (takeRecoveryLink()) {
+      setNeedPassword(true); // came from a password-reset email
+      return;
+    }
+    const pref = localStorage.getItem(BACKEND_KEY);
+    currentSession().then(
+      (arc) => setSession(pref === "platform" ? platformSession() ?? arc : arc),
+      (e) => {
+        setError(String(e.message ?? e));
+        if (pref === "platform") setSession(platformSession());
+      },
+    );
   }, []);
+
+  const choose = (s: Session) => {
+    localStorage.setItem(BACKEND_KEY, s.backend ?? "arcgis");
+    setLookups(null);
+    setDay(null);
+    setError(null);
+    setSession(s);
+  };
 
   // Jobs, Targets, Clients and Lists: read once per sign-in, and again on "Reload tables".
   const loadLookups = () => {
@@ -87,23 +117,39 @@ export default function App() {
     return { points, lines, polygons, rows, colours, acc, sheet, areaHa, jobRow, entity, client, targets, logo };
   }, [day, job, lookups]);
 
+  if (needPassword) {
+    return <NewPassword onDone={(s) => { setNeedPassword(false); choose(s); }} />;
+  }
+
   if (!session) {
     return (
-      <main className="signin">
-        <h1>EcoSync Reporting</h1>
-        {error && <p className="error">{error}</p>}
-        <button onClick={() => signIn().catch((e) => setError(String(e)))}>Sign in with ArcGIS</button>
-      </main>
+      <SignIn
+        error={error}
+        onArcGIS={() => {
+          localStorage.setItem(BACKEND_KEY, "arcgis");
+          signIn().catch((e) => setError(String(e)));
+        }}
+        onPlatform={choose}
+      />
     );
   }
+
+  const signOutNow = () => {
+    if (backend === "platform") platformSignOut();
+    else signOut();
+    setSession(null);
+    setLookups(null);
+    setDay(null);
+  };
 
   return (
     <main>
       <header>
         <h1>EcoSync Reporting</h1>
         <span className="who">
+          <span className={`backend ${backend}`}>{BACKEND_NAME[backend]}</span>{" "}
           {session.username} ·{" "}
-          <button className="link" onClick={() => { signOut(); setSession(null); }}>Sign out</button>
+          <button className="link" onClick={signOutNow}>Sign out</button>
         </span>
       </header>
 
@@ -127,7 +173,7 @@ export default function App() {
 
       {lookups && lookups.missing.length > 0 && (
         <p className="warn">
-          Not found in ArcGIS: {lookups.missing.join(", ")}. Using built-in defaults until they are published.{" "}
+          Not found in {BACKEND_NAME[backend]}: {lookups.missing.join(", ")}. Using built-in defaults until they are published.{" "}
           <button className="link" onClick={loadLookups}>Reload tables</button>
         </p>
       )}
@@ -183,6 +229,10 @@ export default function App() {
             jobRow={view.jobRow}
             lists={lookups?.lists ?? new Map()}
             form1={view.sheet}
+            location={(() => {
+              const b = bounds([...view.points, ...view.lines, ...view.polygons]);
+              return b ? [(b[0] + b[2]) / 2, (b[1] + b[3]) / 2] : null;
+            })()}
             onIssue={(rec, progress, options) => {
               // The letterhead chosen on the job sheet wins over the job's default.
               const code = (rec.entity || view.jobRow?.entity || "").trim().toUpperCase();
@@ -214,7 +264,7 @@ export default function App() {
             }}
           />
 
-          <details className="form1">
+          {backend === "arcgis" && <details className="form1">
             <summary>Survey123 Form 1 record (read only)</summary>
             {view.sheet ? <SheetTable sheet={view.sheet} /> : (
               <p className="warn">
@@ -222,7 +272,7 @@ export default function App() {
                 {day.sheets.length > 0 && <> That day's Form 1 job numbers: {day.sheets.map((s) => `[${attr(s, "job_number") ?? ""}]`).join(", ")}</>}
               </p>
             )}
-          </details>
+          </details>}
         </>
       )}
     </main>

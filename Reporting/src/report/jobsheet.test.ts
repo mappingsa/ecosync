@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { deltaT, weatherWarnings } from "./weather";
+import { compass, deltaT, weatherWarnings } from "./weather";
 import { choiceLabels, prefill, timeText } from "./prefill";
 import { emptyRecord, toAttributes, toRecord } from "../data/dailySchema";
 
@@ -65,4 +65,17 @@ test("record round-trips through attributes, text trimmed to field length", () =
   assert.equal(back.start_temp_c, 21.5);
   assert.equal(back.start_time, "08:30");
   assert.equal(back.end_temp_c, null);
+});
+
+test("compass points from degrees", () => {
+  assert.equal(compass(0), "N");
+  assert.equal(compass(292), "WNW");
+  assert.equal(compass(359), "N");
+  assert.equal(compass(180), "S");
+  assert.equal(compass(null), "");
+});
+
+test("an entered Delta T overrides the calculated one for warnings", () => {
+  assert.equal(weatherWarnings("Start", { temp: 28.5, rh: 21, wind: 10, dt: 6.5 }, limits).length, 0);
+  assert.equal(weatherWarnings("Start", { temp: 18.2, rh: 69, wind: 10, dt: 11 }, limits).length, 1);
 });

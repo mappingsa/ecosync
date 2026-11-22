@@ -25,7 +25,14 @@ export interface Session {
   token: string;
   username: string;
   expires: number; // epoch ms
+  backend?: Backend; // which data source this sign-in is for (default ArcGIS)
 }
+
+/** Where the data comes from: ArcGIS Online, or the EcoSync Data Platform. */
+export type Backend = "arcgis" | "platform";
+
+/** A record or attachment id: an ArcGIS OBJECTID, or a database uuid. */
+export type RecordId = number | string;
 
 export interface Job {
   job_number: string;
@@ -59,7 +66,7 @@ export interface Lookups {
 }
 
 export interface AttachmentInfo {
-  id: number;
+  id: RecordId;
   name: string;
   contentType: string;
   size: number;
@@ -79,9 +86,10 @@ export interface DataSource {
   setupDailyRecords(username: string): Promise<void>;
   dailyRecord(job: string, date: string): Promise<DailyRecord | null>;
   /** Insert or update; returns the record's id. */
-  saveDailyRecord(r: DailyRecord): Promise<number>;
-  attachments(recordId: number): Promise<AttachmentInfo[]>;
-  attachmentUrl(recordId: number, attachmentId: number): string;
-  addAttachment(recordId: number, file: Blob, name: string): Promise<void>;
-  deleteAttachments(recordId: number, attachmentIds: number[]): Promise<void>;
+  saveDailyRecord(r: DailyRecord): Promise<RecordId>;
+  /** Also makes attachmentUrl() work for these files: call it first. */
+  attachments(recordId: RecordId): Promise<AttachmentInfo[]>;
+  attachmentUrl(recordId: RecordId, attachmentId: RecordId): string;
+  addAttachment(recordId: RecordId, file: Blob, name: string): Promise<void>;
+  deleteAttachments(recordId: RecordId, attachmentIds: RecordId[]): Promise<void>;
 }

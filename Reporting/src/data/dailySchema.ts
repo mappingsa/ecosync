@@ -33,7 +33,7 @@ export const DAILY_FIELDS: { name: string; kind: FieldKind; length?: number; lab
 ];
 
 export interface DailyRecord {
-  objectId?: number;
+  objectId?: number | string; // ArcGIS OBJECTID, or the database id
   job_number: string;
   record_date: string;
   start_time: string;
@@ -68,7 +68,7 @@ export function emptyRecord(job: string, date: string): DailyRecord {
 }
 
 /** Plain attribute object -> DailyRecord, case-insensitive, with types enforced. */
-export function toRecord(a: Record<string, unknown>, objectId?: number): DailyRecord {
+export function toRecord(a: Record<string, unknown>, objectId?: number | string): DailyRecord {
   const get = (n: string) => a[Object.keys(a).find((k) => k.toLowerCase() === n) ?? n];
   const r: any = { objectId };
   for (const f of DAILY_FIELDS) {

@@ -105,8 +105,8 @@ export async function issueReport(
     dateLabel: dmy(rec.record_date),
     record: rec,
     warnings: !options.includeWarnings ? [] : [
-      ...weatherWarnings("Start", { temp: rec.start_temp_c, rh: rec.start_rh_pct, wind: rec.start_wind_kmh }, CONFIG.sprayLimits),
-      ...weatherWarnings("Finish", { temp: rec.end_temp_c, rh: rec.end_rh_pct, wind: rec.end_wind_kmh }, CONFIG.sprayLimits),
+      ...weatherWarnings("Start", { temp: rec.start_temp_c, rh: rec.start_rh_pct, wind: rec.start_wind_kmh, dt: rec.start_delta_t }, CONFIG.sprayLimits),
+      ...weatherWarnings("Finish", { temp: rec.end_temp_c, rh: rec.end_rh_pct, wind: rec.end_wind_kmh, dt: rec.end_delta_t }, CONFIG.sprayLimits),
     ],
     rows: ctx.rows,
     areaHa: ctx.areaHa,

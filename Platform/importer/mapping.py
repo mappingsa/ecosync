@@ -117,3 +117,61 @@ def track_runs(features):
             "ewkt": "SRID=4326;MULTILINESTRING((%s))" % ",".join(_pt((x, y)) for _t, x, y, _a in pts),
         })
     return out
+
+
+# --- Daily Records (job sheets) ---------------------------------------------------
+
+DAILY_NUMBERS = ("tank_total_l", "start_temp_c", "start_rh_pct", "start_wind_kmh", "start_delta_t",
+                 "end_temp_c", "end_rh_pct", "end_wind_kmh", "end_delta_t")
+DAILY_TEXTS = ("start_time", "end_time", "start_wind_dir", "end_wind_dir", "weather_source",
+               "observations", "flag_issues")
+DAILY_LISTS = ("operators", "equipment", "chemicals")   # "; "-separated in ArcGIS
+
+
+def split_list(value):
+    return [x.strip() for x in str(value or "").split(";") if x.strip()]
+
+
+def _num(v):
+    try:
+        return float(v) if v not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def daily_row(a):
+    """ArcGIS Daily Records attributes -> daily_records columns (no org/job).
+    None if the date is unusable."""
+    date = str(attr(a, "record_date") or "").strip()
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        return None
+    row = {"record_date": date}
+    for k in DAILY_NUMBERS:
+        row[k] = _num(attr(a, k))
+    for k in DAILY_TEXTS:
+        v = attr(a, k)
+        row[k] = None if v in (None, "") else str(v)
+    for k in DAILY_LISTS:
+        row[k] = split_list(attr(a, k))
+    entity = norm(attr(a, "entity"))
+    row["letterhead"] = entity if entity in ("MSA", "FPE") else None
+    row["status"] = "issued" if norm(attr(a, "status")) == "ISSUED" else "draft"
+    return row
+
+
+SIGNATURE = re.compile(r"^signature.*\.png$", re.I)   # same rules as the reporting app
+PDF = re.compile(r"\.pdf$", re.I)
+
+
+def attachment_kind(name):
+    if SIGNATURE.match(name or ""):
+        return "signature"
+    if PDF.search(name or ""):
+        return "report"
+    return "photo"
+
+
+def safe_name(name):
+    """Storage keys: keep letters, digits, dot, dash, underscore."""
+    s = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "file")).strip("_")
+    return s or "file"
