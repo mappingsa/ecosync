@@ -8,7 +8,7 @@ export function baseStyle(): maplibregl.StyleSpecification {
   return {
     version: 8,
     sources: {
-      imagery: { type: "raster", tiles: [CONFIG.basemap.tiles], tileSize: 256, maxzoom: 19, attribution: CONFIG.basemap.attribution },
+      imagery: { type: "raster", tiles: [CONFIG.basemap.tiles], tileSize: 256, maxzoom: CONFIG.basemap.maxzoom, attribution: CONFIG.basemap.attribution },
     },
     layers: [{ id: "imagery", type: "raster", source: "imagery" }],
   };

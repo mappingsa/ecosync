@@ -213,3 +213,39 @@ test("editing: role, create, update and delete go to the right tables", async ()
   fakeServer(() => []);
   await assert.rejects(src().updateFeature("points", "p1", { notes: "x" }), /Not saved/);
 });
+
+test("reference layers: save in batches, clean up a failed save, read back with ids", async () => {
+  let fail = false;
+  const calls = fakeServer((c) => {
+    const t = c.url.pathname.split("/").pop();
+    if (t === "members") return [{ org_id: "org1", role: "editor" }];
+    if (t === "reference_layers" && c.method === "POST") return [{ id: "L1" }];
+    if (t === "reference_features" && c.method === "POST") { if (fail) throw new Error("boom"); return undefined; }
+    if (t === "reference_features_json") return [{ id: 7, props: { NAME: "Home" }, geometry: { type: "Point", coordinates: [1, 2] } }];
+    return [];
+  });
+  const s = src();
+  const feats = Array.from({ length: 1201 }, (_, i) => ({ props: { i }, ewkt: "SRID=4326;POINT(1 2)" }));
+  const seen: number[] = [];
+  assert.equal(await s.createRefLayer({ name: "Bounds", colour: "#FFD400", source_file: "b.zip", projection: "MGA zone 54" }, feats, (n) => seen.push(n)), "L1");
+  const layer = calls.find((c) => c.method === "POST" && c.url.pathname.endsWith("reference_layers"))!;
+  assert.deepEqual({ org: layer.body.org_id, n: layer.body.feature_count }, { org: "org1", n: 1201 });
+  const batches = calls.filter((c) => c.method === "POST" && c.url.pathname.endsWith("reference_features"));
+  assert.deepEqual(batches.map((b) => b.body.length), [500, 500, 201]);
+  assert.deepEqual(batches[0].body[0], { layer_id: "L1", org_id: "org1", props: { i: 0 }, geom: "SRID=4326;POINT(1 2)" });
+  assert.deepEqual(seen, [500, 1000, 1201]);
+
+  const f = await s.refFeatures("L1");
+  assert.deepEqual(f[0].properties, { NAME: "Home", _id: 7 });
+
+  // a failure part-way removes the half-saved layer
+  globalThis.fetch = (async (input: string, init: any = {}) => {
+    const url = new URL(input);
+    calls.push({ method: init.method ?? "GET", url, body: init.body ? JSON.parse(init.body) : undefined, headers: init.headers });
+    if (url.pathname.endsWith("reference_layers") && init.method === "POST") return new Response(JSON.stringify([{ id: "L2" }]));
+    if (url.pathname.endsWith("reference_features")) return new Response(JSON.stringify({ message: "too big" }), { status: 413 });
+    return new Response("[]");
+  }) as typeof fetch;
+  await assert.rejects(s.createRefLayer({ name: "x", colour: "#fff", source_file: "x", projection: "x" }, feats), /too big/);
+  assert.ok(calls.some((c) => c.method === "DELETE" && c.url.searchParams.get("id") === "eq.L2"));
+});

@@ -78,6 +78,9 @@ export const CONFIG = {
   basemap: {
     tiles: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
     attribution: "Imagery: Esri World Imagery",
+    // Esri has no photos at the closest zooms in rural areas and sends "Map data
+    // not yet available" tiles there. Stop at this zoom and enlarge it beyond.
+    maxzoom: 18,
   },
 } as const;
 

@@ -50,12 +50,23 @@ interface Props {
   editing?: boolean;
   onHandle?: (e: HandleEvent) => void;
   selectedVertex?: string | null;
+  /** Reference layers (imported files) to draw under the spray records. */
+  refs?: RefDraw[];
 }
+
+export interface RefDraw {
+  id: string; // layer id, or "preview-N" while an import is being checked
+  colour: string;
+  features: import("../data/types").Feature[];
+}
+
+/** Map key of a reference feature: "ref:<layer>:<feature>". */
+export const refKey = (layerId: string, f: import("../data/types").Feature, i: number) => `ref:${layerId}:${String(f.properties._id ?? i)}`;
 
 const TRACK_COLOUR = "#00E5FF";
 const SELECT_COLOUR = "#FFEB3B";
 const SOURCES: WorkspaceLayer[] = ["polygons", "lines", "tracks", "points"];
-const CLICKABLE = ["ws-points", "ws-lines", "ws-tracks", "ws-poly-fill"];
+const CLICKABLE = ["ws-points", "ws-lines", "ws-tracks", "ws-poly-fill", "ref-pt", "ref-line", "ref-fill"];
 const LAYER_IDS: Record<WorkspaceLayer, string[]> = {
   polygons: ["ws-poly-fill", "ws-poly-edge"],
   lines: ["ws-lines"],
@@ -70,7 +81,7 @@ function style(): maplibregl.StyleSpecification {
   return {
     version: 8,
     sources: {
-      imagery: { type: "raster", tiles: [CONFIG.basemap.tiles], tileSize: 256, maxzoom: 19, attribution: CONFIG.basemap.attribution },
+      imagery: { type: "raster", tiles: [CONFIG.basemap.tiles], tileSize: 256, maxzoom: CONFIG.basemap.maxzoom, attribution: CONFIG.basemap.attribution },
       streets: { type: "raster", tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"], tileSize: 256, maxzoom: 19, attribution: "© OpenStreetMap contributors" },
     },
     layers: [
@@ -99,6 +110,11 @@ export function WorkspaceMap(p: Props) {
     map.on("load", () => {
       for (const s of SOURCES) map.addSource(`ws-${s}`, { type: "geojson", data: empty });
       map.addSource("ws-measure", { type: "geojson", data: empty });
+      // Reference layers, under everything else
+      map.addSource("ref", { type: "geojson", data: empty });
+      map.addLayer({ id: "ref-fill", type: "fill", source: "ref", filter: ["in", ["geometry-type"], ["literal", ["Polygon", "MultiPolygon"]]], paint: { "fill-color": ["get", "_colour"], "fill-opacity": ["case", ["get", "_preview"], 0.25, 0.12] } });
+      map.addLayer({ id: "ref-line", type: "line", source: "ref", filter: ["!=", ["geometry-type"], "Point"], paint: { "line-color": ["get", "_colour"], "line-width": ["case", ["get", "_preview"], 3, 2] } });
+      map.addLayer({ id: "ref-pt", type: "circle", source: "ref", filter: ["==", ["geometry-type"], "Point"], paint: { "circle-radius": 5, "circle-color": ["get", "_colour"], "circle-stroke-color": "#fff", "circle-stroke-width": 1.5 } });
       map.addLayer({ id: "ws-poly-fill", type: "fill", source: "ws-polygons", paint: { "fill-color": ["get", "_colour"], "fill-opacity": 0.35 } });
       map.addLayer({ id: "ws-poly-edge", type: "line", source: "ws-polygons", paint: { "line-color": ["get", "_colour"], "line-width": 2 } });
       map.addLayer({ id: "ws-tracks", type: "line", source: "ws-tracks", paint: { "line-color": TRACK_COLOUR, "line-width": 2, "line-dasharray": [2, 2] } });
@@ -116,6 +132,8 @@ export function WorkspaceMap(p: Props) {
       map.addLayer({ id: "sel-line", type: "line", source: "ws-lines", filter: none, paint: { "line-color": SELECT_COLOUR, "line-width": 6 } });
       map.addLayer({ id: "sel-track", type: "line", source: "ws-tracks", filter: none, paint: { "line-color": SELECT_COLOUR, "line-width": 4 } });
       map.addLayer({ id: "sel-point", type: "circle", source: "ws-points", filter: none, paint: { "circle-radius": 10, "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": SELECT_COLOUR, "circle-stroke-width": 3 } });
+      map.addLayer({ id: "sel-ref", type: "line", source: "ref", filter: none, paint: { "line-color": SELECT_COLOUR, "line-width": 4 } });
+      map.addLayer({ id: "sel-ref-pt", type: "circle", source: "ref", filter: none, paint: { "circle-radius": 10, "circle-color": "rgba(0,0,0,0)", "circle-stroke-color": SELECT_COLOUR, "circle-stroke-width": 3 } });
       // The measuring line
       map.addLayer({ id: "m-fill", type: "fill", source: "ws-measure", filter: ["==", ["geometry-type"], "Polygon"], paint: { "fill-color": "#fff", "fill-opacity": 0.2 } });
       map.addLayer({ id: "m-line", type: "line", source: "ws-measure", filter: ["==", ["geometry-type"], "LineString"], paint: { "line-color": "#fff", "line-width": 2.5 } });
@@ -256,6 +274,8 @@ export function WorkspaceMap(p: Props) {
     if (!ready || !map) return;
     const f = ["==", ["get", "_key"], p.selected ?? ""] as any;
     for (const id of ["sel-poly", "sel-line", "sel-track", "sel-point"]) map.setFilter(id, f);
+    map.setFilter("sel-ref", ["all", f, ["!=", ["geometry-type"], "Point"]] as any);
+    map.setFilter("sel-ref-pt", ["all", f, ["==", ["geometry-type"], "Point"]] as any);
   }, [ready, p.selected]);
 
   // Measuring line
@@ -268,6 +288,19 @@ export function WorkspaceMap(p: Props) {
     if (c.length >= 3) features.push({ type: "Feature", properties: {}, geometry: { type: "Polygon", coordinates: [[...c, c[0]]] } });
     (map.getSource("ws-measure") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features } as any);
   }, [ready, p.measureCoords]);
+
+  // Reference layers
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!ready || !map) return;
+    const features: any[] = [];
+    for (const r of p.refs ?? []) {
+      r.features.forEach((f, i) => {
+        if (f.geometry) features.push({ type: "Feature", geometry: f.geometry, properties: { _key: refKey(r.id, f, i), _colour: r.colour, _preview: r.id.startsWith("preview") } });
+      });
+    }
+    (map.getSource("ref") as maplibregl.GeoJSONSource).setData({ type: "FeatureCollection", features } as any);
+  }, [ready, p.refs]);
 
   // The shape being drawn or reshaped
   useEffect(() => {

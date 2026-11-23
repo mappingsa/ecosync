@@ -433,3 +433,36 @@ button.ghost.danger:hover:not(:disabled) { background: var(--danger-soft); color
   .hint-inline { display: none; }
   .editform select, .editform input, .editform textarea { font-size: 16px; }
 }
+.statusbar .import button.link { color: var(--text-2); font-size: 12px; }
+.statusbar .import button.link:hover { color: var(--accent); }
+.statusbar .import.bad, .statusbar .import.bad button.link { color: var(--danger); }
+.welcome-close { position: absolute; top: 8px; right: 8px; color: var(--text-3); }
+.welcome-close:hover { color: var(--text); }
+
+/* --- reference layers and importing --- */
+.import-card { border-color: var(--accent); display: flex; flex-direction: column; gap: 8px; }
+.import-card h3 { color: var(--accent); margin-bottom: 0; }
+.import-card h3 .h-note { max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.import-card p { margin: 0; }
+.imp-layer { display: flex; flex-direction: column; gap: 5px; padding: 8px 0; border-bottom: 1px dashed var(--border); }
+.imp-row { display: flex; align-items: center; gap: 8px; }
+.imp-name { flex: 1; min-width: 0; font-weight: 600; }
+.swatches { display: flex; gap: 6px; flex-wrap: wrap; }
+.sw { width: 22px; height: 22px; padding: 0; border-radius: 50%; border: 2px solid var(--border-strong); }
+.sw.on { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sw:hover:not(:disabled) { filter: brightness(1.1); }
+.zone-row { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-2); }
+.ref-row { display: flex; align-items: center; gap: 2px; }
+.ref-row .toggle-row { flex: 1; min-width: 0; }
+.ref-row .icon-btn { color: var(--text-3); }
+.ref-row .icon-btn:hover:not(:disabled) { color: var(--text); background: var(--hover); }
+.ref-row .danger-ico:hover:not(:disabled) { color: var(--danger); background: var(--danger-soft); }
+.small-spin { width: 11px; height: 11px; color: var(--text-3); }
+.ref-size { margin: 0 0 8px !important; font-weight: 600; }
+.kv.attrs { max-height: 260px; overflow-y: auto; font-size: 13px; }
+.kv.attrs dd { word-break: break-word; display: block; }
+.pcard.selected h3 .swatch { margin-right: 2px; }
+@media (max-width: 800px) {
+  .imp-name, .zone-row select { font-size: 16px; }
+  .sw { width: 28px; height: 28px; }
+}

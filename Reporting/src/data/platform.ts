@@ -21,6 +21,16 @@ const TABLES: Record<EditableLayer, string> = { points: "treatment_points", line
 
 export type Role = "owner" | "editor" | "viewer";
 
+export interface RefLayer {
+  id: string;
+  name: string;
+  colour: string;
+  feature_count: number;
+  projection: string | null;
+  source_file: string | null;
+  created_at: string;
+}
+
 /** The pick lists for the edit form, with ids. */
 export interface Domains {
   jobs: { id: string; job_number: string; active: boolean }[];
@@ -296,6 +306,66 @@ export class PlatformSource implements DataSource {
   /** Hides a record (kept in the database, so the import can't bring it back). */
   async deleteFeature(layer: EditableLayer, id: string): Promise<void> {
     await this.updateFeature(layer, id, { deleted_at: new Date().toISOString() } as FeatureValues);
+  }
+
+  // --- reference layers (011_reference_layers.sql) -------------------------
+
+  async refLayers(): Promise<RefLayer[]> {
+    return this.all("reference_layers", { select: "id,name,colour,feature_count,projection,source_file,created_at", order: "name" });
+  }
+
+  /** A layer's features, each with its database id as properties._id. */
+  async refFeatures(layerId: string): Promise<Feature[]> {
+    const rows = await this.all("reference_features_json", { select: "id,props,geometry", layer_id: `eq.${layerId}`, order: "id" });
+    return rows.map((r) => ({ type: "Feature" as const, geometry: r.geometry ?? null, properties: { ...(r.props ?? {}), _id: r.id } }));
+  }
+
+  /** Save an imported file as a shared layer. Returns the new layer's id. */
+  async createRefLayer(
+    meta: { name: string; colour: string; source_file: string; projection: string },
+    features: { props: Attributes; ewkt: string }[],
+    progress?: (done: number) => void,
+  ): Promise<string> {
+    const org = await this.org();
+    const rows = await this.rest("reference_layers", { select: "id" }, {
+      method: "POST", prefer: "return=representation", body: { ...meta, org_id: org, feature_count: features.length },
+    });
+    if (!rows?.length) throw new PlatformError("Not saved: your role may not allow adding layers.");
+    const id: string = rows[0].id;
+    try {
+      for (let i = 0; i < features.length; i += 500) {
+        await this.rest("reference_features", {}, {
+          method: "POST", prefer: "return=minimal",
+          body: features.slice(i, i + 500).map((f) => ({ layer_id: id, org_id: org, props: f.props, geom: f.ewkt })),
+        });
+        progress?.(Math.min(features.length, i + 500));
+      }
+    } catch (e) {
+      await this.rest("reference_layers", { id: `eq.${id}` }, { method: "DELETE" }).catch(() => undefined); // no half-saved layers
+      throw e;
+    }
+    return id;
+  }
+
+  async updateRefLayer(id: string, v: { name?: string; colour?: string }): Promise<void> {
+    await this.rest("reference_layers", { id: `eq.${id}` }, { method: "PATCH", body: v });
+  }
+
+  async deleteRefLayer(id: string): Promise<void> {
+    await this.rest("reference_layers", { id: `eq.${id}` }, { method: "DELETE" });
+  }
+
+  // --- the hourly ArcGIS import (010_cloud_import.sql) ---------------------
+
+  /** The most recent import run, or null before the first. */
+  async lastImport(): Promise<{ at: number; ok: boolean; summary: string } | null> {
+    const rows = await this.rest("import_runs", { select: "started_at,ok,summary", order: "started_at.desc", limit: "1" });
+    return rows.length ? { at: Date.parse(rows[0].started_at), ok: rows[0].ok, summary: rows[0].summary ?? "" } : null;
+  }
+
+  /** Start an import now (owners and editors); records arrive in about a minute. */
+  async importNow(): Promise<void> {
+    await this.rest("rpc/run_arcgis_import_now", {}, { method: "POST", body: {} });
   }
 
   /** Form 1 stays in Survey123: no Form 1 records here. */

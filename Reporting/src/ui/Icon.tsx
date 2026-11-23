@@ -31,6 +31,7 @@ const PATHS: Record<string, string> = {
   addArea: "M5 7.5 12 3.5l7 5-2.5 10.5h-9L5 7.5Z M5 7.5h.01 M12 3.5h.01 M19 8.5h.01 M16.5 19h.01 M7.5 19h.01",
   edit: "M4 20h4L19.5 8.5a2.1 2.1 0 0 0-4-4L4 16v4Z M14 6l4 4",
   shape: "M5 6.5 12 4l7 4.5-3 10H8L5 6.5Z M12 4v.01 M5 6.5v.01 M19 8.5v.01 M16 18.5v.01 M8 18.5v.01",
+  upload: "M12 16V4 M7 8.5l5-5 5 5 M4 20h16",
   trash: "M4 7h16 M10 11v6 M14 11v6 M6 7l1 13h10l1-13 M9 7V4h6v3",
 };
 

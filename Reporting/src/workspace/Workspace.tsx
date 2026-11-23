@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import { CONFIG } from "../config";
-import type { Domains, EditableLayer, PlatformSource, Role, WorkspaceLayer } from "../data/platform";
+import type { Domains, EditableLayer, PlatformSource, RefLayer, Role, WorkspaceLayer } from "../data/platform";
+import type { Feature } from "../data/types";
 import type { Lookups } from "../data/types";
 import { colourKey, colourMap } from "../report/colours";
 import { bounds, dayWindow, methodOf, speciesOf } from "../report/stats";
@@ -17,6 +18,11 @@ import {
   toEwkt, toLocalInput, type Addr, type Pt, type Shape,
 } from "./edit";
 import { EditForm, type FormValues } from "./EditForm";
+import { ACCEPT, geomToEwkt, NeedsZone, readFiles, type InFile } from "./importers";
+import { ImportCard, RefDetails, RefLayerList, REF_COLOURS, ZoneCard, type PendingLayer } from "./RefLayers";
+import { refKey, type RefDraw } from "./WorkspaceMap";
+
+type SavedRef = RefLayer & { visible: boolean; features: Feature[] | null };
 
 interface FormState {
   mode: "new" | "edit";
@@ -46,7 +52,7 @@ const daysAgo = (n: number) => {
 const when = (ms: number) => (ms ? new Date(ms).toLocaleString("en-AU", { timeZone: CONFIG.timeZone, dateStyle: "short", timeStyle: "short" }) : "–");
 const shortDate = (d: string) => new Date(`${d}T12:00:00Z`).toLocaleDateString("en-AU", { day: "numeric", month: "short", year: "numeric", timeZone: "UTC" });
 const sizeText = (layer: WorkspaceLayer, v: number | null) => (v == null ? "–" : layer === "polygons" ? fmtArea(v) : fmtLength(v));
-const QUICK: [string, number | null][] = [["7 days", 7], ["30 days", 30], ["Year", 365], ["Everything", null]];
+const QUICK: [string, number | null][] = [["Today", 0], ["7 days", 7], ["30 days", 30], ["Year", 365], ["Everything", null]];
 
 function download(name: string, text: string, type: string) {
   const url = URL.createObjectURL(new Blob([text], { type }));
@@ -82,6 +88,7 @@ export function Workspace({ source, lookups }: Props) {
   const [pointer, setPointer] = useState<[number, number] | null>(null);
   const [view, setView] = useState<{ lat: number; zoom: number } | null>(null);
   const [query, setQuery] = useState("");
+  const [welcomeClosed, setWelcomeClosed] = useState(false);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const pin = useRef<maplibregl.Marker | null>(null);
   const [toastOk, setToastOk] = useState(false);
@@ -98,6 +105,48 @@ export function Workspace({ source, lookups }: Props) {
   const [saving, setSaving] = useState(false);
   const dragAddr = useRef<Addr | null>(null);
   const canEdit = role === "owner" || role === "editor";
+  const [lastImport, setLastImport] = useState<{ at: number; ok: boolean; summary: string } | null>(null);
+
+  // --- reference layers (imported files) ---
+  const [refs, setRefs] = useState<SavedRef[]>([]);
+  const [pending, setPending] = useState<{ label: string; layers: PendingLayer[] } | null>(null);
+  const [needZone, setNeedZone] = useState<{ files: InFile[]; label: string; zone: number } | null>(null);
+  const [importBusy, setImportBusy] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+
+  async function loadRefs() {
+    let list: RefLayer[];
+    try { list = await source.refLayers(); } catch { return; } // before 011_reference_layers.sql: nothing to show
+    setRefs((cur) => list.map((l) => {
+      const was = cur.find((c) => c.id === l.id);
+      return { ...l, visible: was?.visible ?? true, features: was?.features ?? null };
+    }));
+    for (const l of list) {
+      source.refFeatures(l.id).then(
+        (features) => setRefs((cur) => cur.map((c) => (c.id === l.id ? { ...c, features } : c))),
+        () => undefined,
+      );
+    }
+  }
+  useEffect(() => { loadRefs(); }, [source]);
+
+  // when ArcGIS records last came across (checked every 5 minutes)
+  useEffect(() => {
+    const check = () => source.lastImport().then(setLastImport, () => undefined);
+    check();
+    const t = setInterval(check, 5 * 60_000);
+    return () => clearInterval(t);
+  }, [source]);
+
+  async function importNow() {
+    try {
+      await source.importNow();
+      flash("ArcGIS import started. New records arrive in about a minute; press Load records to see them.", true);
+      setTimeout(() => source.lastImport().then(setLastImport, () => undefined), 90_000);
+    } catch (e: any) {
+      flash(e.message ?? String(e));
+    }
+  }
 
   useEffect(() => {
     source.myRole().then((r) => {
@@ -183,6 +232,13 @@ export function Workspace({ source, lookups }: Props) {
   const selRow = sel ? toRow(sel, targets) : null;
 
   const pick = (key: string | null, zoom = false) => {
+    if (key?.startsWith("ref:")) {
+      setSelected(key);
+      setPanel("details");
+      const r = refIndex.get(key);
+      if (zoom && r) zoomTo(bounds([r.feature]));
+      return;
+    }
     setSelected(key);
     const it = key ? byKey.get(key) : null;
     if (key) setPanel("details");
@@ -223,6 +279,86 @@ export function Workspace({ source, lookups }: Props) {
       (err) => flash(err.code === 1 ? "Location is turned off for this site. Allow it in the browser to use Locate." : "Couldn't get your location."),
       { enableHighAccuracy: true, timeout: 15000 },
     );
+  }
+
+  // --- importing files ---------------------------------------------------------------
+
+  const refDraws = useMemo<RefDraw[]>(() => [
+    ...refs.filter((r) => r.visible && r.features).map((r) => ({ id: r.id, colour: r.colour, features: r.features! })),
+    ...(pending?.layers ?? []).filter((l) => l.include).map((l, i) => ({ id: `preview-${i}`, colour: l.colour, features: l.features })),
+  ], [refs, pending]);
+  const refIndex = useMemo(() => {
+    const m = new Map<string, { name: string; colour: string; feature: Feature }>();
+    for (const r of refs) r.features?.forEach((f, i) => m.set(refKey(r.id, f, i), { name: r.name, colour: r.colour, feature: f }));
+    pending?.layers.forEach((l, k) => l.features.forEach((f, i) => m.set(refKey(`preview-${k}`, f, i), { name: `${l.name} (not saved yet)`, colour: l.colour, feature: f })));
+    return m;
+  }, [refs, pending]);
+  const refSel = selected?.startsWith("ref:") ? refIndex.get(selected) ?? null : null;
+
+  async function chooseFiles(list: FileList | null) {
+    if (!list?.length) return;
+    const files: InFile[] = await Promise.all([...list].map(async (f) => ({ name: f.name, data: new Uint8Array(await f.arrayBuffer()) })));
+    const label = files.length === 1 ? files[0].name : `${files.length} files`;
+    if (fileInput.current) fileInput.current.value = ""; // so the same file can be chosen again
+    await readChosen(files, label);
+  }
+
+  async function readChosen(files: InFile[], label: string, zone?: number) {
+    stopEditing();
+    setImportBusy("Reading…");
+    try {
+      const layers = await readFiles(files, { zone });
+      const used = new Set(refs.map((r) => r.colour));
+      const free = REF_COLOURS.filter((c) => !used.has(c));
+      setPending({ label, layers: layers.map((l, i) => ({ ...l, include: l.features.length > 0, colour: free[i % Math.max(1, free.length)] ?? REF_COLOURS[i % REF_COLOURS.length] })) });
+      setNeedZone(null);
+      setPanel("layers");
+      setSheetOpen(true);
+      zoomTo(bounds(layers.flatMap((l) => l.features)));
+    } catch (e) {
+      if (e instanceof NeedsZone) setNeedZone({ files, label, zone: 54 });
+      else flash((e as Error).message ?? String(e));
+    } finally {
+      setImportBusy(null);
+    }
+  }
+
+  async function saveImport() {
+    if (!pending) return;
+    const todo = pending.layers.filter((l) => l.include && l.features.length);
+    try {
+      for (const [k, l] of todo.entries()) {
+        const rows = l.features.map((f) => ({ props: Object.fromEntries(Object.entries(f.properties).filter(([, v]) => v !== undefined)), ewkt: geomToEwkt(f.geometry!) }));
+        const tag = todo.length > 1 ? `${k + 1}/${todo.length}: ` : "";
+        setImportBusy(`${tag}saving…`);
+        await source.createRefLayer(
+          { name: l.name.trim() || "Imported layer", colour: l.colour, source_file: pending.label, projection: l.projection },
+          rows,
+          (done) => setImportBusy(`${tag}${Math.round((done / rows.length) * 100)}%`),
+        );
+      }
+      setPending(null);
+      setSelected(null);
+      await loadRefs();
+      flash(todo.length === 1 ? `“${todo[0].name}” saved as a layer.` : `${todo.length} layers saved.`, true);
+    } catch (e) {
+      flash((e as Error).message ?? String(e));
+    } finally {
+      setImportBusy(null);
+    }
+  }
+
+  async function deleteRef(id: string) {
+    const r = refs.find((x) => x.id === id);
+    if (!r || !confirm(`Delete the layer “${r.name}” for everyone in your organisation?`)) return;
+    try {
+      await source.deleteRefLayer(id);
+      setRefs((cur) => cur.filter((x) => x.id !== id));
+      if (selected?.startsWith(`ref:${id}:`)) setSelected(null);
+      flash("Layer deleted.", true);
+    } catch (e) {
+      flash((e as Error).message ?? String(e));
+    }
   }
 
   // --- drawing and editing ---------------------------------------------------------
@@ -472,6 +608,25 @@ export function Workspace({ source, lookups }: Props) {
         <div className="pbody">
           {panel === "layers" && (
             <>
+              {needZone && (
+                <ZoneCard
+                  file={needZone.label}
+                  zone={needZone.zone}
+                  onZone={(zone) => setNeedZone({ ...needZone, zone })}
+                  onRead={() => readChosen(needZone.files, needZone.label, needZone.zone)}
+                  onCancel={() => setNeedZone(null)}
+                />
+              )}
+              {pending && (
+                <ImportCard
+                  fileLabel={pending.label}
+                  layers={pending.layers}
+                  busy={importBusy}
+                  onChange={(i, v) => setPending({ ...pending, layers: pending.layers.map((l, k) => (k === i ? { ...l, ...v } : l)) })}
+                  onSave={saveImport}
+                  onCancel={() => { setPending(null); if (selected?.startsWith("ref:preview")) setSelected(null); }}
+                />
+              )}
               <section className="pcard">
                 <h3><Icon name="calendar" size={15} />Dates</h3>
                 <div className="date-row">
@@ -510,6 +665,14 @@ export function Workspace({ source, lookups }: Props) {
                 )}
               </section>
 
+              <RefLayerList
+                layers={refs.map((r) => ({ id: r.id, name: r.name, colour: r.colour, count: r.feature_count, visible: r.visible, loading: r.visible && !r.features }))}
+                canEdit={canEdit}
+                onToggle={(id, visible) => setRefs((cur) => cur.map((c) => (c.id === id ? { ...c, visible } : c)))}
+                onZoom={(id) => zoomTo(bounds(refs.find((r) => r.id === id)?.features ?? []))}
+                onDelete={deleteRef}
+              />
+
               <section className="pcard">
                 <h3><Icon name="map" size={15} />Basemap</h3>
                 <div className="seg small">
@@ -546,7 +709,11 @@ export function Workspace({ source, lookups }: Props) {
                   onCancel={stopEditing}
                 />
               )}
-              {form ? null : selRow ? (
+              {!form && refSel && (
+                <RefDetails layerName={refSel.name} colour={refSel.colour} feature={refSel.feature}
+                  onZoom={() => zoomTo(bounds([refSel.feature]))} onClear={() => setSelected(null)} />
+              )}
+              {form || refSel ? null : selRow ? (
                 <section className="pcard selected">
                   <h3><Icon name="pointer" size={15} />Selected {LAYER_NAMES[selRow.layer].toLowerCase().replace(/s$/, "")}</h3>
                   <dl className="kv">
@@ -608,6 +775,7 @@ export function Workspace({ source, lookups }: Props) {
           editing={reshaping}
           onHandle={onHandle}
           selectedVertex={selVertex}
+          refs={refDraws}
           fit={fit}
           onMap={(mp) => (mapRef.current = mp)}
           onPointer={setPointer}
@@ -623,6 +791,8 @@ export function Workspace({ source, lookups }: Props) {
               <ToolBtn icon="addPoint" label="Point" on={drawLayer === "points"} disabled={reshaping || !!form} onClick={() => (drawLayer === "points" ? stopEditing() : startDraw("points"))} />
               <ToolBtn icon="addLine" label="Line" on={drawLayer === "lines"} disabled={reshaping || !!form} onClick={() => (drawLayer === "lines" ? stopEditing() : startDraw("lines"))} />
               <ToolBtn icon="addArea" label="Area" on={drawLayer === "polygons"} disabled={reshaping || !!form} onClick={() => (drawLayer === "polygons" ? stopEditing() : startDraw("polygons"))} />
+              <ToolBtn icon="upload" label="Import" on={!!pending || !!needZone} disabled={busyEditing || !!importBusy} onClick={() => fileInput.current?.click()} />
+              <input ref={fileInput} type="file" multiple accept={ACCEPT} hidden onChange={(e) => chooseFiles(e.target.files)} />
             </>
           )}
           <span className="tb-sep" />
@@ -686,12 +856,14 @@ export function Workspace({ source, lookups }: Props) {
         )}
 
         {busy && <div className="float-card loading"><span className="spinner" />Loading records…</div>}
+        {importBusy === "Reading…" && <div className="float-card loading"><span className="spinner" />Reading file…</div>}
         {toast && !busy && <div className={`float-card toast ${toastOk ? "good" : ""}`} onClick={() => setToast(null)}>{toastOk && <Icon name="check" size={16} />}{toast}</div>}
 
-        {!items && !busy && !busyEditing && (
+        {!items && !busy && !busyEditing && !welcomeClosed && !pending && !needZone && (
           <div className="welcome">
+            <button className="icon-btn sm welcome-close" onClick={() => setWelcomeClosed(true)} title="Just show the map" aria-label="Close and just show the map"><Icon name="close" size={16} /></button>
             <h2>Your field records</h2>
-            <p>Spray points, areas and tracks from EcoSyncField. Choose how far back to look.</p>
+            <p>Spray points, areas and tracks from EcoSyncField. Choose how far back to look, or close this to just use the map.</p>
             <div className="chips">
               {QUICK.map(([label, d]) => <button key={label} className="chip lg" onClick={() => quick(d)}>{label}</button>)}
             </div>
@@ -742,6 +914,13 @@ export function Workspace({ source, lookups }: Props) {
         <span className="grow" />
         <span>{items ? `${shown.length.toLocaleString()} of ${items.length.toLocaleString()} records showing` : "No records loaded"}</span>
         <span>{selected ? "1 selected" : ""}</span>
+        {lastImport && (
+          <span className={`import ${lastImport.ok ? "" : "bad"}`} title={`${lastImport.summary}${canEdit ? "\n\nClick to import now" : ""}`}>
+            {canEdit
+              ? <button className="link" onClick={importNow}>ArcGIS import {when(lastImport.at)} {lastImport.ok ? "✓" : "failed"}</button>
+              : <>ArcGIS import {when(lastImport.at)} {lastImport.ok ? "✓" : "failed"}</>}
+          </span>
+        )}
         <span className="src"><i />EcoSync database · Sydney</span>
       </footer>
     </div>
